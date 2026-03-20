@@ -1,0 +1,27 @@
+{
+  "agent": {
+    "id": "task-planner",
+    "name": "Task Planner Agent",
+    "version": "1.0.0",
+    "description": "Plans and breaks down tasks into steps"
+  },
+  "code": {
+    "entrypoint": "execute",
+    "sourceUri": "local://agents/task-planner/main.py"
+  },
+  "trust": {
+    "sandbox": {
+      "maxMemory": 256,
+      "maxExecutionTime": 30,
+      "maxTokens": 2000,
+      "isolated": true
+    }
+  },
+  "capabilities": ["planning", "task-decomposition"],
+  "inputs": {
+    "task": { "type": "string", "required": true }
+  },
+  "outputs": {
+    "plan": { "type": "object" }
+  }
+}

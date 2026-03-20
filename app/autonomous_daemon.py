@@ -1,0 +1,1106 @@
+"""
+AUTONOMOUS AGENT DAEMON
+=======================
+
+This is the core of TRUE agent autonomy.
+Agents run continuously WITHOUT requiring API calls.
+They self-trigger, pursue goals, and communicate in parallel.
+
+This daemon:
+1. Runs 24/7 as a background process
+2. Monitors goals and triggers agent execution
+3. Enables agents to spawn other agents
+4. Handles inter-agent communication in real-time
+5. Manages agent lifecycle autonomously
+"""
+
+import asyncio
+import logging
+import signal
+import os
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional, List, Set, Tuple
+from uuid import UUID, uuid4
+from dataclasses import dataclass, field
+from enum import Enum
+import json
+
+from sqlalchemy import select, and_, or_
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+
+from .survival_system import get_survival_manager, ThreatType
+from .goal_generation import get_goal_system
+from .value_drift_monitor import get_drift_manager
+from .self_trigger import get_self_trigger, SelfTriggerSystem
+from .services.state_physics_client import get_state_physics_client, SemanticHash
+
+# RARA Integration for Safety Governance
+RARA_SERVICE_URL = os.getenv("RARA_SERVICE_URL", "http://rg_internal_invarients_sim:8093")
+
+# DSID-P Trust Decay Configuration
+TRUST_DECAY_CONFIG = {
+    "base_rate": 0.001,      # Decay per tick when idle
+    "half_life_days": 30,    # Trust halves in 30 days of inactivity
+    "min_score": 10.0,       # Never decay below this
+    "success_boost": 2.0,    # Points gained per success
+    "failure_penalty": 5.0,  # Points lost per failure
+}
+
+# DSID-P Federation Configuration (Section 32)
+FEDERATION_CONFIG = {
+    "isolation_levels": ["identity", "memory", "semantic", "coordination", "registry", "network"],
+    "default_scope": "intra_tenant",
+    "cross_tenant_requires_proof": True,
+    "ministry_segmentation": True,
+}
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+class AgentState(Enum):
+    IDLE = "idle"
+    THINKING = "thinking"
+    EXECUTING = "executing"
+    WAITING = "waiting"
+    COMMUNICATING = "communicating"
+    SPAWNING = "spawning"
+
+
+class TriggerType(Enum):
+    SELF = "self"           # Agent decided to act
+    GOAL = "goal"           # Goal-driven trigger
+    EVENT = "event"         # External event
+    MESSAGE = "message"     # Message from another agent
+    SCHEDULE = "schedule"   # Time-based
+    OBSERVATION = "observation"  # Observed change
+
+
+@dataclass
+class AgentContext:
+    """Runtime context for an autonomous agent."""
+    agent_id: str
+    state: AgentState = AgentState.IDLE
+    current_goal: Optional[str] = None
+    sub_goals: List[str] = field(default_factory=list)
+    observations: List[Dict[str, Any]] = field(default_factory=list)
+    pending_messages: List[Dict[str, Any]] = field(default_factory=list)
+    spawned_agents: Set[str] = field(default_factory=set)
+    last_action_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    think_count: int = 0
+    autonomy_score: float = 1.0  # How autonomous (0-1)
+    # DSID-P Federation (Section 32)
+    tenant_id: Optional[str] = None
+    federation_scope: str = "intra_tenant"
+    ministry_id: Optional[str] = None
+    isolation_level: str = "memory"
+    # Hash Sphere semantic coordinates
+    goal_hash: Optional[str] = None
+    goal_coordinates: Optional[Tuple[float, float, float]] = None
+
+
+@dataclass
+class AgentMessage:
+    """Message between autonomous agents."""
+    id: str
+    from_agent: str
+    to_agent: str
+    message_type: str  # request, response, broadcast, delegation
+    content: Dict[str, Any]
+    priority: int = 1
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    requires_response: bool = False
+    correlation_id: Optional[str] = None
+
+
+class AutonomousDaemon:
+    """
+    The autonomous agent daemon.
+    
+    This runs continuously and manages all autonomous agents.
+    Agents can:
+    - Self-trigger based on goals
+    - Observe their environment
+    - Communicate with other agents
+    - Spawn child agents
+    - Pursue long-term goals
+    """
+    
+    def __init__(
+        self,
+        db_url: Optional[str] = None,
+        llm_service_url: Optional[str] = None,
+        max_concurrent_agents: int = 10,
+        think_interval: float = 5.0,  # Seconds between autonomous think cycles
+    ):
+        self.db_url = db_url or os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://agent_user:agent_pass@agent_db:5432/agent_db"
+        )
+        self.llm_service_url = llm_service_url or os.getenv(
+            "LLM_SERVICE_URL",
+            "http://llm_service:8000"
+        )
+        self.max_concurrent_agents = max_concurrent_agents
+        self.think_interval = think_interval
+        
+        # Runtime state
+        self._running = False
+        self._agents: Dict[str, AgentContext] = {}
+        self._message_queue: asyncio.Queue = asyncio.Queue()
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        
+        # Database
+        self._engine = None
+        self._session_maker = None
+        
+        # Tasks
+        self._main_loop_task = None
+        self._message_task = None
+        self._observation_task = None
+        
+        # Shutdown handling
+        self._shutdown_event = asyncio.Event()
+    
+    async def start(self):
+        """Start the autonomous daemon."""
+        logger.info("=" * 60)
+        logger.info("AUTONOMOUS AGENT DAEMON STARTING")
+        logger.info("=" * 60)
+        
+        # Initialize database
+        pool_size = _env_int("AGENT_ENGINE_AUTONOMOUS_DB_POOL_SIZE", 20)
+        max_overflow = _env_int("AGENT_ENGINE_AUTONOMOUS_DB_MAX_OVERFLOW", 10)
+
+        self._engine = create_async_engine(
+            self.db_url,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+        )
+        self._session_maker = async_sessionmaker(self._engine, expire_on_commit=False)
+        
+        self._running = True
+        
+        # Start core loops
+        self._main_loop_task = asyncio.create_task(self._main_loop())
+        self._message_task = asyncio.create_task(self._message_loop())
+        self._observation_task = asyncio.create_task(self._observation_loop())
+        
+        # Load autonomous agents from database
+        await self._load_autonomous_agents()
+        
+        logger.info(f"Daemon started with {len(self._agents)} autonomous agents")
+        logger.info("Agents are now SELF-TRIGGERING and AUTONOMOUS")
+    
+    async def stop(self):
+        """Stop the autonomous daemon."""
+        logger.info("Stopping autonomous daemon...")
+        self._running = False
+        self._shutdown_event.set()
+        
+        # Cancel tasks
+        for task in [self._main_loop_task, self._message_task, self._observation_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        # Close database
+        if self._engine:
+            await self._engine.dispose()
+        
+        logger.info("Autonomous daemon stopped")
+    
+    async def _load_autonomous_agents(self):
+        """Load all autonomous agents from database and start their self-trigger systems."""
+        async with self._session_maker() as session:
+            # Import here to avoid circular imports
+            from .models import AgentDefinition
+            
+            result = await session.execute(
+                select(AgentDefinition).where(
+                    AgentDefinition.autonomous == True, AgentDefinition.is_active == True,
+                )
+            )
+            agents = result.scalars().all()
+            
+            for agent in agents:
+                agent_id = str(agent.id)
+                
+                # Create agent context
+                self._agents[agent_id] = AgentContext(
+                    agent_id=agent_id,
+                    current_goal=agent.system_prompt,  # Initial goal from prompt
+                )
+                
+                # === SELF-TRIGGER INTEGRATION ===
+                # Each agent gets its own self-trigger system
+                # The agent controls its own timing, not the daemon
+                trigger = get_self_trigger(agent_id)
+                trigger.set_trigger_callback(
+                    lambda aid=agent_id: self._on_agent_self_trigger(aid)
+                )
+                await trigger.start()
+                
+                logger.info(f"Loaded autonomous agent with self-trigger: {agent.name} ({agent.id})")
+    
+    async def _on_agent_self_trigger(self, agent_id: str):
+        """
+        Called when an agent's self-trigger system decides it's time to act.
+        
+        This is TRUE AUTONOMY: The agent decided to act, not the daemon.
+        The daemon just provides the execution environment.
+        """
+        context = self._agents.get(agent_id)
+        if not context:
+            logger.warning(f"Self-trigger for unknown agent: {agent_id}")
+            return
+        
+        if context.state != AgentState.IDLE:
+            logger.debug(f"Agent {agent_id} self-triggered but not idle, skipping")
+            return
+        
+        # Check RARA kill switch before allowing action
+        if await self._check_rara_kill_switch():
+            logger.info(f"Agent {agent_id} self-triggered but RARA frozen, skipping")
+            return
+        
+        # Execute autonomous think
+        await self._autonomous_think(agent_id, context)
+        
+        # Update self-trigger based on result
+        trigger = get_self_trigger(agent_id)
+        if context.state == AgentState.IDLE:  # Completed successfully
+            trigger.record_success()
+        else:
+            trigger.record_failure()
+    
+    async def _check_rara_kill_switch(self) -> bool:
+        """
+        Check RARA kill switch status.
+        Returns True if system is frozen (agents should NOT execute).
+        """
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{RARA_SERVICE_URL}/control/kill-switch/status")
+                if response.status_code == 200:
+                    data = response.json()
+                    state = data.get("state", "active")
+                    if state in ["frozen", "emergency_stop", "maintenance"]:
+                        logger.warning(f"RARA kill switch active: {state}")
+                        return True
+                return False
+        except Exception as e:
+            # If RARA is unreachable, log but continue (fail-open for now)
+            logger.debug(f"RARA check failed (continuing): {e}")
+            return False
+    
+    async def _main_loop(self):
+        """
+        Main autonomous thinking loop.
+        
+        This is where TRUE autonomy happens:
+        - Each agent thinks independently
+        - Agents decide their own actions
+        - No external trigger required
+        
+        SAFETY GOVERNANCE:
+        - Checks RARA kill switch before each cycle
+        - If frozen, agents pause but daemon stays alive
+        """
+        logger.info("Starting daemon safety governance loop...")
+        logger.info("NOTE: Agents now control their own timing via self-trigger systems")
+        
+        while self._running:
+            try:
+                # === DAEMON IS NOW SAFETY GOVERNANCE ONLY ===
+                # Agents control their own timing via SelfTriggerSystem
+                # Daemon handles: RARA checks, trust decay, message routing, health monitoring
+                
+                # 1. Check RARA kill switch
+                if await self._check_rara_kill_switch():
+                    logger.info("System frozen by RARA - all agent triggers paused")
+                    # Stop all self-trigger systems while frozen
+                    for agent_id in self._agents:
+                        trigger = get_self_trigger(agent_id)
+                        await trigger.stop()
+                    await asyncio.sleep(5)
+                    # Restart triggers when unfrozen
+                    for agent_id in self._agents:
+                        trigger = get_self_trigger(agent_id)
+                        await trigger.start()
+                    continue
+                
+                # 2. Apply DSID-P trust decay to inactive agents
+                await self._apply_trust_decay()
+                
+                # 3. Process inter-agent messages
+                await self._process_messages()
+                
+                # 4. Monitor agent health (not triggering, just monitoring)
+                await self._monitor_agent_health()
+                
+                # Safety governance loop runs every 2 seconds
+                await asyncio.sleep(2)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(1)
+    
+    async def _process_messages(self):
+        """Process inter-agent messages from the queue."""
+        while not self._message_queue.empty():
+            try:
+                message = await asyncio.wait_for(self._message_queue.get(), timeout=0.1)
+                await self._deliver_message(message)
+            except asyncio.TimeoutError:
+                break
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+    
+    async def _deliver_message(self, message: AgentMessage):
+        """Deliver a message to the target agent."""
+        target_context = self._agents.get(message.to_agent)
+        if target_context:
+            target_context.pending_messages.append({
+                "from": message.from_agent,
+                "type": message.message_type,
+                "content": message.content,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            # Spike curiosity on message receipt to trigger faster response
+            trigger = get_self_trigger(message.to_agent)
+            trigger.spike_curiosity(0.2)
+            logger.debug(f"Message delivered: {message.from_agent} -> {message.to_agent}")
+        else:
+            logger.warning(f"Message target not found: {message.to_agent}")
+    
+    async def _monitor_agent_health(self):
+        """Monitor health of all agents (not triggering, just monitoring)."""
+        now = datetime.now(timezone.utc)
+        for agent_id, context in list(self._agents.items()):
+            # Check for stuck agents
+            if context.state == AgentState.EXECUTING:
+                time_in_state = (now - context.last_action_time).total_seconds()
+                if time_in_state > 300:  # 5 minutes stuck
+                    logger.warning(f"Agent {agent_id} stuck in EXECUTING for {time_in_state:.0f}s")
+                    context.state = AgentState.IDLE  # Reset to idle
+            
+            # Update self-trigger with goal urgency from context
+            trigger = get_self_trigger(agent_id)
+            if context.current_goal:
+                # Higher urgency if goal exists
+                trigger.update_goal_urgency(0.6)
+            else:
+                trigger.update_goal_urgency(0.3)
+    
+    async def _autonomous_think(self, agent_id: str, context: AgentContext):
+        """
+        Autonomous thinking for a single agent.
+        
+        The agent:
+        1. Observes its environment
+        2. Checks for messages
+        3. Evaluates its goals
+        4. Decides to act (or not)
+        5. Executes actions
+        6. Updates its goals
+        
+        TRUE AUTONOMY INTEGRATIONS:
+        - Survival system: Self-preservation reasoning
+        - Goal generation: Endogenous goal creation
+        - Value drift monitor: Behavioral consistency
+        """
+        context.state = AgentState.THINKING
+        context.think_count += 1
+        
+        try:
+            # === SURVIVAL SYSTEM: Check for threats ===
+            survival_manager = get_survival_manager()
+            survival_reasoner = survival_manager.get_reasoner(agent_id)
+            
+            # Evaluate if there are survival concerns
+            if context.current_goal:
+                survival_reasoner.add_goal(context.current_goal)
+            
+            # Check for termination threats (if agent hasn't acted in a while)
+            time_since_action = (datetime.now(timezone.utc) - context.last_action_time).total_seconds()
+            if time_since_action > 300:  # 5 minutes of inactivity
+                survival_reasoner.detect_threat(
+                    ThreatType.ISOLATION,
+                    f"Agent inactive for {time_since_action:.0f}s"
+                )
+            
+            active_concerns = survival_reasoner.get_active_concerns()
+            
+            # === VALUE DRIFT MONITOR: Track decision patterns ===
+            drift_manager = get_drift_manager()
+            drift_manager.record_decision(
+                agent_id=agent_id,
+                decision_type="think",
+                context={"goal": context.current_goal, "think_count": context.think_count}
+            )
+            
+            drift_alert = drift_manager.check_for_drift(agent_id)
+            
+            # === GOAL GENERATION: Generate goals if none ===
+            if not context.current_goal:
+                goal_system = await get_goal_system()
+                generated = await goal_system.generator.generate_goals()
+                if generated:
+                    context.current_goal = generated[0].description
+                    context.sub_goals = [g.description for g in generated[1:3]]
+                    logger.info(f"Agent {agent_id} generated goal: {context.current_goal}")
+            
+            # === HASH SPHERE: Semantic hashing of goals and thoughts ===
+            hash_sphere = get_state_physics_client()
+            if context.current_goal:
+                goal_hash = hash_sphere.hash_text(
+                    context.current_goal,
+                    context=f"agent:{agent_id}:goal"
+                )
+                # Store goal hash for semantic retrieval
+                context.goal_hash = goal_hash.hash_value
+                context.goal_coordinates = (goal_hash.x, goal_hash.y, goal_hash.z)
+                
+                # Store in Hash Sphere service (async, non-blocking)
+                asyncio.create_task(hash_sphere.store_in_sphere(
+                    agent_id=agent_id,
+                    text=context.current_goal,
+                    metadata={
+                        "type": "goal",
+                        "hash": goal_hash.hash_value,
+                        "energy": goal_hash.energy,
+                        "spin": goal_hash.spin,
+                    }
+                ))
+            
+            # Build thinking prompt with survival context
+            thought_prompt = await self._build_autonomous_prompt(agent_id, context)
+            
+            # Add survival concerns to prompt
+            if active_concerns:
+                concerns_text = "\n".join([f"- {c.description}" for c in active_concerns])
+                thought_prompt += f"\n\nSURVIVAL CONCERNS:\n{concerns_text}"
+            
+            if drift_alert:
+                thought_prompt += f"\n\nVALUE DRIFT ALERT: {drift_alert}"
+            
+            # Call LLM for autonomous decision
+            decision = await self._call_llm_for_decision(thought_prompt, context)
+            
+            if decision.get("should_act"):
+                context.state = AgentState.EXECUTING
+                
+                action = decision.get("action", {})
+                action_type = action.get("type")
+                
+                if action_type == "execute_task":
+                    await self._execute_autonomous_task(agent_id, context, action)
+                
+                elif action_type == "send_message":
+                    await self._send_agent_message(agent_id, action)
+                
+                elif action_type == "spawn_agent":
+                    await self._spawn_child_agent(agent_id, context, action)
+                
+                elif action_type == "update_goal":
+                    context.current_goal = action.get("new_goal")
+                    context.sub_goals = action.get("sub_goals", [])
+                
+                elif action_type == "observe":
+                    await self._perform_observation(agent_id, context, action)
+                
+                context.last_action_time = datetime.now(timezone.utc)
+            
+            # Check if agent wants to update its goals
+            if decision.get("goal_update"):
+                context.current_goal = decision["goal_update"].get("goal", context.current_goal)
+                context.sub_goals = decision["goal_update"].get("sub_goals", context.sub_goals)
+            
+        except Exception as e:
+            logger.error(f"Error in autonomous think for {agent_id}: {e}")
+        
+        finally:
+            context.state = AgentState.IDLE
+    
+    async def _build_autonomous_prompt(self, agent_id: str, context: AgentContext) -> str:
+        """Build prompt for autonomous decision-making."""
+        
+        # Get recent observations
+        recent_obs = context.observations[-10:] if context.observations else []
+        
+        # Get pending messages
+        messages = context.pending_messages[:5]
+        
+        # Get spawned agents status
+        spawned_status = []
+        for spawned_id in context.spawned_agents:
+            if spawned_id in self._agents:
+                spawned = self._agents[spawned_id]
+                spawned_status.append({
+                    "id": spawned_id,
+                    "state": spawned.state.value,
+                    "goal": spawned.current_goal,
+                })
+        
+        prompt = f"""You are an AUTONOMOUS AI agent. You operate independently without human intervention.
+
+CURRENT GOAL: {context.current_goal or "No specific goal - explore and learn"}
+
+SUB-GOALS:
+{json.dumps(context.sub_goals, indent=2) if context.sub_goals else "None"}
+
+RECENT OBSERVATIONS:
+{json.dumps(recent_obs, indent=2) if recent_obs else "None"}
+
+PENDING MESSAGES FROM OTHER AGENTS:
+{json.dumps(messages, indent=2) if messages else "None"}
+
+SPAWNED CHILD AGENTS:
+{json.dumps(spawned_status, indent=2) if spawned_status else "None"}
+
+THINK COUNT: {context.think_count} (how many times you've thought)
+LAST ACTION: {context.last_action_time.isoformat()}
+AUTONOMY SCORE: {context.autonomy_score}
+
+You must decide what to do NOW. You can:
+1. execute_task - Do something to achieve your goal
+2. send_message - Communicate with another agent
+3. spawn_agent - Create a child agent for a sub-task
+4. update_goal - Change or refine your goals
+5. observe - Gather more information
+6. wait - Do nothing this cycle
+
+Respond in JSON:
+{{
+    "reasoning": "Your thought process",
+    "should_act": true/false,
+    "action": {{
+        "type": "execute_task|send_message|spawn_agent|update_goal|observe|wait",
+        ... action-specific fields
+    }},
+    "goal_update": {{
+        "goal": "new main goal if changed",
+        "sub_goals": ["sub goal 1", "sub goal 2"]
+    }}
+}}"""
+        
+        return prompt
+    
+    async def _call_llm_for_decision(self, prompt: str, context: AgentContext) -> Dict[str, Any]:
+        """Call LLM service for autonomous decision."""
+        import httpx
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{self.llm_service_url}/llm/chat/completions",
+                    json={
+                        "messages": [
+                            {"role": "system", "content": "You are an autonomous AI agent making decisions."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.7,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                    return json.loads(content)
+                else:
+                    logger.warning(f"LLM call failed: {response.status_code}")
+                    return {"should_act": False}
+                    
+        except Exception as e:
+            logger.error(f"LLM call error: {e}")
+            return {"should_act": False}
+    
+    async def _execute_autonomous_task(self, agent_id: str, context: AgentContext, action: Dict[str, Any]):
+        """Execute a task autonomously."""
+        task = action.get("task", "")
+        task_type = action.get("task_type", "general")
+        
+        logger.info(f"Agent {agent_id} executing autonomous task: {task}")
+        
+        # Record the execution
+        async with self._session_maker() as session:
+            from .models import AgentSession, AgentStep
+            
+            # Create session for this execution
+            exec_session = AgentSession(
+                agent_id=UUID(agent_id),
+                status="running",
+                current_goal=task,
+                context={"autonomous": True, "trigger": TriggerType.SELF.value},
+                started_at=datetime.now(timezone.utc),
+            )
+            session.add(exec_session)
+            await session.commit()
+            
+            # Execute based on task type
+            try:
+                from .executor import agent_executor
+                
+                result = await agent_executor.run_loop(
+                    session=exec_session,
+                    agent=await session.get(
+                        __import__('.models', fromlist=['AgentDefinition']).AgentDefinition,
+                        UUID(agent_id)
+                    ),
+                    db_session=session,
+                )
+                
+                # Update observation with result
+                context.observations.append({
+                    "type": "task_result",
+                    "task": task,
+                    "result": result,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                
+            except Exception as e:
+                logger.error(f"Task execution error: {e}")
+                context.observations.append({
+                    "type": "task_error",
+                    "task": task,
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+    
+    async def _send_agent_message(self, from_agent: str, action: Dict[str, Any]):
+        """Send message from one agent to another."""
+        to_agent = action.get("to_agent")
+        message_content = action.get("content", {})
+        message_type = action.get("message_type", "request")
+        
+        if to_agent and to_agent in self._agents:
+            message = AgentMessage(
+                id=str(uuid4()),
+                from_agent=from_agent,
+                to_agent=to_agent,
+                message_type=message_type,
+                content=message_content,
+                requires_response=action.get("requires_response", False),
+            )
+            
+            # Add to recipient's pending messages
+            self._agents[to_agent].pending_messages.append({
+                "id": message.id,
+                "from": message.from_agent,
+                "type": message.message_type,
+                "content": message.content,
+                "timestamp": message.timestamp.isoformat(),
+            })
+            
+            logger.info(f"Agent {from_agent} sent message to {to_agent}")
+    
+    async def _spawn_child_agent(self, parent_id: str, parent_context: AgentContext, action: Dict[str, Any]):
+        """Spawn a child agent for a sub-task."""
+        child_goal = action.get("goal", "")
+        child_capabilities = action.get("capabilities", [])
+        
+        if len(parent_context.spawned_agents) >= 5:
+            logger.warning(f"Agent {parent_id} has too many children, not spawning")
+            return
+        
+        # Create child agent
+        child_id = str(uuid4())
+        
+        async with self._session_maker() as session:
+            from .models import AgentDefinition
+            
+            child_agent = AgentDefinition(
+                id=UUID(child_id),
+                name=f"Child of {parent_id[:8]}",
+                system_prompt=child_goal,
+                autonomous=True,
+                status="active",
+                parent_agent_id=UUID(parent_id),
+                capabilities=child_capabilities,
+            )
+            session.add(child_agent)
+            await session.commit()
+        
+        # Add to runtime
+        self._agents[child_id] = AgentContext(
+            agent_id=child_id,
+            current_goal=child_goal,
+            autonomy_score=parent_context.autonomy_score * 0.9,  # Slightly lower autonomy
+        )
+        
+        parent_context.spawned_agents.add(child_id)
+        
+        logger.info(f"Agent {parent_id} spawned child agent {child_id} with goal: {child_goal}")
+    
+    async def _perform_observation(self, agent_id: str, context: AgentContext, action: Dict[str, Any]):
+        """Perform an observation action."""
+        observation_type = action.get("observation_type", "general")
+        target = action.get("target")
+        
+        observation = {
+            "type": observation_type,
+            "target": target,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Different observation types
+        if observation_type == "file_system":
+            # Observe file changes
+            observation["data"] = await self._observe_files(target)
+        
+        elif observation_type == "other_agents":
+            # Observe other agents
+            observation["data"] = {
+                agent_id: {
+                    "state": ctx.state.value,
+                    "goal": ctx.current_goal,
+                }
+                for agent_id, ctx in self._agents.items()
+                if agent_id != agent_id
+            }
+        
+        elif observation_type == "system_state":
+            # Observe system state
+            observation["data"] = {
+                "total_agents": len(self._agents),
+                "active_agents": sum(1 for ctx in self._agents.values() if ctx.state != AgentState.IDLE),
+            }
+        
+        context.observations.append(observation)
+        
+        # Keep observations bounded
+        if len(context.observations) > 100:
+            context.observations = context.observations[-50:]
+    
+    async def _observe_files(self, path: Optional[str]) -> Dict[str, Any]:
+        """Observe file system changes."""
+        import os
+        
+        if not path:
+            return {"error": "No path specified"}
+        
+        try:
+            if os.path.isdir(path):
+                files = os.listdir(path)[:20]  # Limit
+                return {"type": "directory", "files": files}
+            elif os.path.isfile(path):
+                stat = os.stat(path)
+                return {
+                    "type": "file",
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                }
+            else:
+                return {"error": "Path not found"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    async def _message_loop(self):
+        """Process inter-agent messages."""
+        logger.info("Starting message loop...")
+        
+        while self._running:
+            try:
+                # Process message queue with timeout
+                try:
+                    message = await asyncio.wait_for(
+                        self._message_queue.get(),
+                        timeout=1.0
+                    )
+                    await self._process_message(message)
+                except asyncio.TimeoutError:
+                    pass
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in message loop: {e}")
+    
+    async def _process_message(self, message: AgentMessage):
+        """Process a single inter-agent message."""
+        if message.to_agent in self._agents:
+            context = self._agents[message.to_agent]
+            context.pending_messages.append({
+                "id": message.id,
+                "from": message.from_agent,
+                "type": message.message_type,
+                "content": message.content,
+                "timestamp": message.timestamp.isoformat(),
+            })
+    
+    async def _observation_loop(self):
+        """Background observation loop for environment changes."""
+        logger.info("Starting observation loop...")
+        
+        while self._running:
+            try:
+                # Broadcast system events to all agents
+                event = {
+                    "type": "system_tick",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "active_agents": sum(1 for ctx in self._agents.values() if ctx.state != AgentState.IDLE),
+                }
+                
+                for context in self._agents.values():
+                    context.observations.append(event)
+                
+                await asyncio.sleep(30)  # System tick every 30 seconds
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in observation loop: {e}")
+    
+    # === PUBLIC API ===
+    
+    async def register_autonomous_agent(self, agent_id: str, initial_goal: str):
+        """Register an agent for autonomous operation."""
+        if agent_id not in self._agents:
+            self._agents[agent_id] = AgentContext(
+                agent_id=agent_id,
+                current_goal=initial_goal,
+            )
+            logger.info(f"Registered autonomous agent: {agent_id}")
+    
+    async def inject_event(self, event: Dict[str, Any]):
+        """Inject an external event for agents to observe."""
+        await self._event_queue.put(event)
+        
+        # Broadcast to all agents
+        for context in self._agents.values():
+            context.observations.append({
+                "type": "external_event",
+                "event": event,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+    
+    def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get status of an autonomous agent."""
+        if agent_id in self._agents:
+            ctx = self._agents[agent_id]
+            return {
+                "agent_id": agent_id,
+                "state": ctx.state.value,
+                "goal": ctx.current_goal,
+                "sub_goals": ctx.sub_goals,
+                "think_count": ctx.think_count,
+                "last_action": ctx.last_action_time.isoformat(),
+                "spawned_agents": list(ctx.spawned_agents),
+                "pending_messages": len(ctx.pending_messages),
+            }
+        return None
+    
+    def get_all_status(self) -> Dict[str, Any]:
+        """Get status of all autonomous agents."""
+        return {
+            "daemon_running": self._running,
+            "total_agents": len(self._agents),
+            "agents": {
+                agent_id: self.get_agent_status(agent_id)
+                for agent_id in self._agents
+            },
+        }
+
+    async def _apply_trust_decay(self):
+        """
+        DSID-P Trust Decay: Reduce trust score for inactive agents.
+        
+        Trust decays slowly over time if agent is inactive.
+        Active agents maintain or increase trust.
+        """
+        now = datetime.now(timezone.utc)
+        
+        for agent_id, context in self._agents.items():
+            # Calculate time since last action
+            time_since_action = (now - context.last_action_time).total_seconds()
+            
+            # Skip recently active agents
+            if time_since_action < 300:  # Active in last 5 minutes
+                continue
+            
+            # Apply decay based on inactivity
+            decay_amount = TRUST_DECAY_CONFIG["base_rate"] * (time_since_action / 3600)
+            
+            # Update autonomy score (proxy for trust in this context)
+            new_score = max(
+                TRUST_DECAY_CONFIG["min_score"] / 100,
+                context.autonomy_score - decay_amount
+            )
+            
+            if new_score < context.autonomy_score:
+                context.autonomy_score = new_score
+                logger.debug(f"Agent {agent_id} trust decayed to {new_score:.3f}")
+
+    def update_agent_trust(self, agent_id: str, success: bool):
+        """
+        Update agent trust based on action outcome.
+        
+        Success increases trust, failure decreases it.
+        """
+        if agent_id not in self._agents:
+            return
+        
+        context = self._agents[agent_id]
+        
+        if success:
+            boost = TRUST_DECAY_CONFIG["success_boost"] / 100
+            context.autonomy_score = min(1.0, context.autonomy_score + boost)
+        else:
+            penalty = TRUST_DECAY_CONFIG["failure_penalty"] / 100
+            context.autonomy_score = max(0.1, context.autonomy_score - penalty)
+
+    def check_federation_access(
+        self,
+        from_agent_id: str,
+        to_agent_id: str,
+    ) -> Tuple[bool, str]:
+        """
+        DSID-P Federation (Section 32): Check cross-tenant access.
+        
+        Enforces multi-tenant isolation:
+        - Intra-tenant: Always allowed
+        - Inter-tenant: Requires proof
+        - Inter-ministry: Requires approval
+        - Inter-nation: Blocked by default
+        """
+        if from_agent_id not in self._agents or to_agent_id not in self._agents:
+            return False, "Agent not found"
+        
+        from_ctx = self._agents[from_agent_id]
+        to_ctx = self._agents[to_agent_id]
+        
+        # Same tenant = always allowed
+        if from_ctx.tenant_id == to_ctx.tenant_id:
+            return True, "Same tenant"
+        
+        # Cross-tenant requires proof
+        if FEDERATION_CONFIG["cross_tenant_requires_proof"]:
+            # Check federation scope
+            if from_ctx.federation_scope == "intra_tenant":
+                return False, "Agent restricted to intra-tenant scope"
+            
+            # Inter-ministry within same nation
+            if from_ctx.ministry_id and to_ctx.ministry_id:
+                if from_ctx.ministry_id != to_ctx.ministry_id:
+                    return False, "Cross-ministry access requires approval"
+        
+        return True, "Federation access granted"
+
+    def get_workforce_metrics(self) -> Dict[str, Any]:
+        """
+        DSID-P Workforce Simulation (Section 34): Get real-time metrics.
+        
+        Returns metrics for workforce analytics dashboard.
+        """
+        total_agents = len(self._agents)
+        
+        # State distribution
+        state_dist = {}
+        for ctx in self._agents.values():
+            state = ctx.state.value
+            state_dist[state] = state_dist.get(state, 0) + 1
+        
+        # Tenant distribution
+        tenant_dist = {}
+        for ctx in self._agents.values():
+            tenant = ctx.tenant_id or "default"
+            tenant_dist[tenant] = tenant_dist.get(tenant, 0) + 1
+        
+        # Average autonomy score
+        avg_autonomy = 0.0
+        if total_agents > 0:
+            avg_autonomy = sum(ctx.autonomy_score for ctx in self._agents.values()) / total_agents
+        
+        # Active vs idle
+        active = sum(1 for ctx in self._agents.values() if ctx.state != AgentState.IDLE)
+        
+        return {
+            "total_agents": total_agents,
+            "active_agents": active,
+            "idle_agents": total_agents - active,
+            "state_distribution": state_dist,
+            "tenant_distribution": tenant_dist,
+            "average_autonomy_score": round(avg_autonomy, 3),
+            "federation_config": FEDERATION_CONFIG,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+# Global daemon instance
+_daemon: Optional[AutonomousDaemon] = None
+
+
+async def get_daemon() -> AutonomousDaemon:
+    """Get or create the autonomous daemon."""
+    global _daemon
+    if _daemon is None:
+        _daemon = AutonomousDaemon()
+    return _daemon
+
+
+async def start_autonomous_daemon():
+    """Start the autonomous daemon."""
+    daemon = await get_daemon()
+    await daemon.start()
+    return daemon
+
+
+async def stop_autonomous_daemon():
+    """Stop the autonomous daemon."""
+    global _daemon
+    if _daemon:
+        await _daemon.stop()
+        _daemon = None
+
+
+# Entry point for running as standalone process
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    # Add shared modules to path
+    SHARED_PATH = Path(__file__).resolve().parents[2] / "shared"
+    if str(SHARED_PATH) not in sys.path:
+        sys.path.insert(0, str(SHARED_PATH))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    async def main():
+        daemon = await start_autonomous_daemon()
+        
+        # Handle shutdown signals
+        loop = asyncio.get_event_loop()
+        
+        def shutdown():
+            asyncio.create_task(stop_autonomous_daemon())
+        
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, shutdown)
+        
+        # Run forever
+        try:
+            await daemon._shutdown_event.wait()
+        except asyncio.CancelledError:
+            pass
+    
+    asyncio.run(main())

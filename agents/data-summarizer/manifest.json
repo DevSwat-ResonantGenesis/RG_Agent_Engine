@@ -1,0 +1,27 @@
+{
+  "agent": {
+    "id": "data-summarizer",
+    "name": "Data Summarizer Agent",
+    "version": "1.0.0",
+    "description": "Summarizes data and generates insights"
+  },
+  "code": {
+    "entrypoint": "execute",
+    "sourceUri": "local://agents/data-summarizer/main.py"
+  },
+  "trust": {
+    "sandbox": {
+      "maxMemory": 256,
+      "maxExecutionTime": 30,
+      "maxTokens": 2000,
+      "isolated": true
+    }
+  },
+  "capabilities": ["data-analysis", "summarization"],
+  "inputs": {
+    "data": { "type": "object", "required": true }
+  },
+  "outputs": {
+    "summary": { "type": "object" }
+  }
+}

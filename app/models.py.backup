@@ -1,0 +1,345 @@
+"""Agent Engine database models."""
+
+from datetime import datetime
+import uuid
+
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, Boolean, JSON, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from sqlalchemy.sql import func
+
+from .db import Base
+
+
+class AgentDefinition(Base):
+    """Agent definition with capabilities and configuration."""
+    __tablename__ = "agent_definitions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    system_prompt = Column(Text, nullable=True)
+    
+    # Model configuration
+    model = Column(String(64), default="gpt-4-turbo-preview")
+    temperature = Column(Float, default=0.7)
+    max_tokens = Column(Integer, default=4096)
+    
+    # Capabilities
+    tools = Column(ARRAY(String), nullable=True)  # List of enabled tool IDs
+    tool_config = Column(JSON, nullable=True)  # Tool-specific configurations
+    
+    # Safety envelope
+    safety_config = Column(JSON, nullable=True)  # Safety rules and limits
+    allowed_actions = Column(ARRAY(String), nullable=True)
+    blocked_actions = Column(ARRAY(String), nullable=True)
+    require_approval = Column(ARRAY(String), nullable=True)  # Actions needing human approval
+    
+    # Workflow triggers
+    trigger_config = Column(JSON, nullable=True)  # When to auto-start
+    
+    # Metadata
+    version = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AgentSession(Base):
+    """Active agent session/run."""
+    __tablename__ = "agent_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    user_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    
+    # Session state
+    status = Column(String(32), default="initializing")  # initializing, running, paused, waiting_approval, completed, failed, cancelled
+    current_goal = Column(Text, nullable=True)
+    context = Column(JSON, nullable=True)  # Session context/memory
+    
+    # Loop tracking
+    loop_count = Column(Integer, default=0)
+    total_tokens_used = Column(Integer, default=0)
+    total_tool_calls = Column(Integer, default=0)
+    
+    # Timing
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    last_activity_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Results
+    final_output = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AgentStep(Base):
+    """Individual step in agent execution loop."""
+    __tablename__ = "agent_steps"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    step_number = Column(Integer, nullable=False)
+    
+    # Step type
+    step_type = Column(String(32), nullable=False)  # think, plan, tool_call, observe, respond
+    
+    # Content
+    input_data = Column(JSON, nullable=True)
+    output_data = Column(JSON, nullable=True)
+    reasoning = Column(Text, nullable=True)  # Agent's reasoning for this step
+    
+    # Tool execution
+    tool_name = Column(String(128), nullable=True)
+    tool_input = Column(JSON, nullable=True)
+    tool_output = Column(JSON, nullable=True)
+    
+    # Safety
+    safety_check_passed = Column(Boolean, default=True)
+    safety_violations = Column(ARRAY(String), nullable=True)
+    required_approval = Column(Boolean, default=False)
+    approval_status = Column(String(32), nullable=True)  # pending, approved, rejected
+    
+    # Metrics
+    tokens_used = Column(Integer, default=0)
+    duration_ms = Column(Integer, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ToolDefinition(Base):
+    """Available tools for agents."""
+    __tablename__ = "tool_definitions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    name = Column(String(128), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+    category = Column(String(64), nullable=True)  # web, file, code, api, system
+    
+    # Tool specification (OpenAI function format)
+    parameters_schema = Column(JSON, nullable=True)
+    
+    # Execution
+    handler_type = Column(String(32), nullable=False)  # http, internal, plugin
+    handler_config = Column(JSON, nullable=True)  # URL, function name, etc.
+    
+    # Safety
+    risk_level = Column(String(16), default="low")  # low, medium, high, critical
+    requires_approval = Column(Boolean, default=False)
+    allowed_contexts = Column(ARRAY(String), nullable=True)
+    
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class SafetyRule(Base):
+    """Safety rules and constraints for agent execution."""
+    __tablename__ = "safety_rules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Rule type
+    rule_type = Column(String(32), nullable=False)  # rate_limit, content_filter, action_block, resource_limit
+    
+    # Rule configuration
+    condition = Column(JSON, nullable=True)  # When rule applies
+    action = Column(String(32), nullable=False)  # block, warn, require_approval, log
+    parameters = Column(JSON, nullable=True)  # Rule-specific parameters
+    
+    # Scope
+    applies_to_agents = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # Specific agents, or null for all
+    applies_to_tools = Column(ARRAY(String), nullable=True)  # Specific tools
+    
+    priority = Column(Integer, default=0)  # Higher = checked first
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AgentPlan(Base):
+    """Agent's planned actions for a goal."""
+    __tablename__ = "agent_plans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    
+    goal = Column(Text, nullable=False)
+    steps = Column(JSON, nullable=False)  # Array of planned steps
+    
+    current_step_index = Column(Integer, default=0)
+    status = Column(String(32), default="active")  # active, completed, revised, abandoned
+    
+    # Revision tracking
+    revision_count = Column(Integer, default=0)
+    parent_plan_id = Column(UUID(as_uuid=True), nullable=True)  # If this is a revision
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AgentTeam(Base):
+    """Agent team for collaborative AI workflows."""
+    __tablename__ = "agent_teams"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    org_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Team configuration
+    team_type = Column(String(32), default="collaborative")  # collaborative, hierarchical, specialized
+    config = Column(JSON, nullable=True)  # Team-specific configuration
+    
+    # Member agents
+    member_agent_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
+    lead_agent_id = Column(UUID(as_uuid=True), nullable=True)  # Primary agent for hierarchical teams
+    
+    # NFT/Ownership (for blockchain integration)
+    nft_token_id = Column(String(128), nullable=True)
+    nft_contract_address = Column(String(128), nullable=True)
+    owner_address = Column(String(128), nullable=True)
+    
+    # Rental/Sharing
+    is_rentable = Column(Boolean, default=False)
+    rental_price_per_hour = Column(Float, nullable=True)
+    current_renter_id = Column(UUID(as_uuid=True), nullable=True)
+    rental_expires_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Status
+    status = Column(String(32), default="active")  # active, archived, suspended
+    is_public = Column(Boolean, default=False)
+    
+    # Metrics
+    total_tasks_completed = Column(Integer, default=0)
+    total_tokens_used = Column(Integer, default=0)
+    average_task_duration_ms = Column(Integer, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    archived_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class AgentTeamMember(Base):
+    """Membership of an agent in a team."""
+    __tablename__ = "agent_team_members"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("agent_teams.id"), index=True, nullable=False)
+    agent_id = Column(UUID(as_uuid=True), ForeignKey("agent_definitions.id"), index=True, nullable=False)
+    
+    role = Column(String(64), default="member")  # lead, member, specialist, reviewer
+    capabilities = Column(ARRAY(String), nullable=True)  # What this agent contributes
+    priority = Column(Integer, default=0)  # Execution priority
+    
+    is_active = Column(Boolean, default=True)
+    joined_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AgentTeamWorkflow(Base):
+    """Workflow execution by an agent team."""
+    __tablename__ = "agent_team_workflows"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("agent_teams.id"), index=True, nullable=False)
+    user_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    
+    name = Column(String(255), nullable=True)
+    goal = Column(Text, nullable=False)
+    context = Column(JSON, nullable=True)
+    
+    status = Column(String(32), default="pending")  # pending, running, completed, failed, cancelled
+    current_agent_id = Column(UUID(as_uuid=True), nullable=True)  # Currently executing agent
+    
+    # Results
+    final_output = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Metrics
+    total_steps = Column(Integer, default=0)
+    tokens_used = Column(Integer, default=0)
+    duration_ms = Column(Integer, nullable=True)
+    
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AgentTeamRental(Base):
+    """Rental record for agent teams."""
+    __tablename__ = "agent_team_rentals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id = Column(UUID(as_uuid=True), ForeignKey("agent_teams.id"), index=True, nullable=False)
+    renter_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    owner_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    
+    # Rental terms
+    price_per_hour = Column(Float, nullable=False)
+    total_hours = Column(Float, nullable=False)
+    total_price = Column(Float, nullable=False)
+    
+    # Status
+    status = Column(String(32), default="active")  # active, completed, cancelled
+    
+    started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowTrigger(Base):
+    """Triggers that start agent workflows."""
+    __tablename__ = "workflow_triggers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id = Column(UUID(as_uuid=True), index=True, nullable=False)
+    
+    name = Column(String(128), nullable=False)
+    trigger_type = Column(String(32), nullable=False)  # schedule, webhook, event, condition
+    
+    # Trigger configuration
+    config = Column(JSON, nullable=False)
+    
+    # Schedule (for cron triggers)
+    cron_expression = Column(String(64), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Webhook (for webhook triggers)
+    webhook_secret = Column(String(128), nullable=True)
+    
+    # Event (for event triggers)
+    event_type = Column(String(64), nullable=True)
+    event_filter = Column(JSON, nullable=True)
+    
+    # Input template
+    input_template = Column(JSON, nullable=True)  # How to construct agent input
+    
+    is_active = Column(Boolean, default=True)
+    last_triggered_at = Column(DateTime(timezone=True), nullable=True)
+    trigger_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+# Import autonomy models to ensure they're registered
+from .models_autonomy import (
+    AgentAutonomyMode,
+    AgentModeTransition,
+    AgentWallet,
+    WalletTransaction,
+    AgentGoal,
+    AgentNegotiation,
+    AgentBid,
+    AgentContract,
+    ContractObligation,
+    ApprovalRequest,
+    ExecutionAuditEntry,
+)

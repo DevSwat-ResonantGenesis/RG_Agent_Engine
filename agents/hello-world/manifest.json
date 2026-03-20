@@ -1,0 +1,33 @@
+{
+  "agent": {
+    "id": "hello-world",
+    "name": "Hello World Agent",
+    "version": "1.0.0",
+    "description": "Simple hello world agent for testing"
+  },
+  "code": {
+    "entrypoint": "execute",
+    "sourceUri": "local://agents/hello-world/main.py"
+  },
+  "trust": {
+    "sandbox": {
+      "maxMemory": 256,
+      "maxExecutionTime": 30,
+      "maxTokens": 1000,
+      "isolated": true
+    }
+  },
+  "capabilities": ["text-generation"],
+  "inputs": {
+    "message": {
+      "type": "string",
+      "required": false,
+      "default": "Hello"
+    }
+  },
+  "outputs": {
+    "response": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "agent": {
+    "id": "code-analyzer",
+    "name": "Code Analyzer Agent",
+    "version": "1.0.0",
+    "description": "Analyzes code for patterns and issues"
+  },
+  "code": {
+    "entrypoint": "execute",
+    "sourceUri": "local://agents/code-analyzer/main.py"
+  },
+  "trust": {
+    "sandbox": {
+      "maxMemory": 512,
+      "maxExecutionTime": 60,
+      "maxTokens": 5000,
+      "isolated": true
+    }
+  },
+  "capabilities": ["code-analysis", "pattern-detection"],
+  "inputs": {
+    "code": { "type": "string", "required": true },
+    "language": { "type": "string", "required": false, "default": "python" }
+  },
+  "outputs": {
+    "analysis": { "type": "object" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "agent": {
+    "id": "json-validator",
+    "name": "JSON Validator Agent",
+    "version": "1.0.0",
+    "description": "Validates JSON data against schemas"
+  },
+  "code": {
+    "entrypoint": "execute",
+    "sourceUri": "local://agents/json-validator/main.py"
+  },
+  "trust": {
+    "sandbox": {
+      "maxMemory": 256,
+      "maxExecutionTime": 30,
+      "maxTokens": 1000,
+      "isolated": true
+    }
+  },
+  "capabilities": ["validation", "json-processing"],
+  "inputs": {
+    "json_data": { "type": "string", "required": true },
+    "schema": { "type": "object", "required": false }
+  },
+  "outputs": {
+    "valid": { "type": "boolean" },
+    "errors": { "type": "array" }
+  }
+}
