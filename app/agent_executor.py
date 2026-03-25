@@ -136,7 +136,7 @@ class AgentExecutor:
     """
     
     MAX_ITERATIONS = 20
-    FREE_TIER_CREDITS = 1000
+    FREE_TIER_CREDITS = 15000
     
     def __init__(self, llm_service_url: str = None):
         self.llm_service_url = llm_service_url or "http://llm_service:8000"
