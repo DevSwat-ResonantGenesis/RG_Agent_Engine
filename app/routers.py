@@ -1479,7 +1479,7 @@ async def create_agent(
         user_role = (request.headers.get("x-user-role") or "user").strip().lower()
         is_superuser = (request.headers.get("x-is-superuser") or "").strip().lower() in {"1", "true", "yes", "on"}
         unlimited_credits = (request.headers.get("x-unlimited-credits") or "").strip().lower() in {"1", "true", "yes", "on"}
-        privileged_roles = {"owner", "platform_owner", "admin", "superuser"}
+        privileged_roles = {"platform_owner", "admin", "superuser"}
         privileged_bypass = is_superuser or unlimited_credits or user_role in privileged_roles
 
         from uuid import UUID as PyUUID
@@ -2077,10 +2077,7 @@ async def get_platform_metrics(
                 AgentDefinition.user_id == user_uuid,
                 AgentDefinition.org_id == org_uuid,
             ))
-            session_filter.append(or_(
-                AgentSession.user_id == user_uuid,
-                AgentSession.org_id == org_uuid,
-            ))
+            session_filter.append(AgentSession.user_id == user_uuid)
         else:
             agent_filter.append(AgentDefinition.user_id == user_uuid)
             session_filter.append(AgentSession.user_id == user_uuid)
@@ -2163,10 +2160,7 @@ async def get_platform_metrics_summary(
                 AgentDefinition.user_id == user_uuid,
                 AgentDefinition.org_id == org_uuid,
             ))
-            session_filter.append(or_(
-                AgentSession.user_id == user_uuid,
-                AgentSession.org_id == org_uuid,
-            ))
+            session_filter.append(AgentSession.user_id == user_uuid)
         else:
             agent_filter.append(AgentDefinition.user_id == user_uuid)
             session_filter.append(AgentSession.user_id == user_uuid)
@@ -2658,8 +2652,38 @@ async def start_session(
     session: AsyncSession = Depends(get_session),
 ):
     """Start a new agent session."""
+    from fastapi.responses import JSONResponse
+
     user_id = request.headers.get("x-user-id")
     org_id = request.headers.get("x-org-id")
+    user_role = (request.headers.get("x-user-role") or "user").strip().lower()
+    is_superuser = (request.headers.get("x-is-superuser") or "").strip().lower() in {"1", "true", "yes", "on"}
+    is_privileged = is_superuser or user_role in ("platform_owner", "admin")
+
+    # Credit pre-check: block zero-credit users from running agents
+    if not is_privileged and user_id and user_id != "anonymous":
+        try:
+            billing_url = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000")
+            async with httpx.AsyncClient(timeout=5.0) as hc:
+                bal_resp = await hc.get(f"{billing_url}/billing/credits/balance/{user_id}")
+                if bal_resp.status_code == 200:
+                    bal_data = bal_resp.json()
+                    balance = bal_data.get("balance", 0)
+                    if balance <= 0 and not bal_data.get("unlimited", False):
+                        logger.warning(f"[Credits] User {user_id[:8]}... blocked from starting session: 0 credits")
+                        return JSONResponse(
+                            status_code=402,
+                            content={
+                                "error": "insufficient_credits",
+                                "detail": "Credits exhausted. Please upgrade your plan or purchase credits to run agents.",
+                                "message": "Credits exhausted. Please upgrade your plan or purchase credits to run agents.",
+                                "action_url": "/pricing",
+                                "required": 100,
+                                "available": balance,
+                            },
+                        )
+        except Exception as e:
+            logger.warning(f"[Credits] Balance check failed for session start: {e}")
 
     try:
         agent_uuid = PyUUID(agent_id)
@@ -5053,6 +5077,21 @@ async def sse_session_stream(session_id: str, request: Request):
                         }
                         yield f"event: step\ndata: {json.dumps(step_data, default=str)}\n\n"
 
+                        # Emit token_usage event if step has token data
+                        _step_tokens = getattr(step, 'tokens_used', 0) or 0
+                        if _step_tokens > 0:
+                            yield f"event: token_usage\ndata: {json.dumps({'step': step.step_number, 'tokens': _step_tokens, 'total_tokens': session.total_tokens_used or 0})}\n\n"
+
+                        # Emit credit events from step output_data
+                        _out = step.output_data or {}
+                        if isinstance(_out, dict) and _out.get('credits_deducted'):
+                            yield f"event: credit_deduction\ndata: {json.dumps({'step': step.step_number, 'amount': _out['credits_deducted'], 'balance_after': _out.get('credits_balance', 0), 'total_used': _out.get('credits_used_total', 0)})}\n\n"
+                        if isinstance(_out, dict) and _out.get('credit_warning'):
+                            _cw_type = _out['credit_warning']
+                            _cw_bal = _out.get('credits_balance', 0)
+                            _cw_msg = 'Credits exhausted!' if _cw_type == 'zero' else f'Low credit balance: {_cw_bal} remaining'
+                            yield f"event: credit_warning\ndata: {json.dumps({'type': _cw_type, 'balance': _cw_bal, 'message': _cw_msg})}\n\n"
+
                     # Check terminal states
                     if current_status in ("completed", "failed", "cancelled"):
                         done_data = {
@@ -5061,6 +5100,7 @@ async def sse_session_stream(session_id: str, request: Request):
                             "error": session.error_message,
                             "total_tool_calls": session.total_tool_calls,
                             "loop_count": session.loop_count,
+                            "total_tokens": session.total_tokens_used or 0,
                         }
                         yield f"event: done\ndata: {json.dumps(done_data, default=str)}\n\n"
                         break

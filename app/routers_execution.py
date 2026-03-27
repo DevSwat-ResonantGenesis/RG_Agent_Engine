@@ -6,9 +6,18 @@ API endpoints for task execution, reasoning, and agent collaboration.
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from uuid import UUID as PyUUID
+import httpx
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+BILLING_SERVICE_URL = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000")
+CREDIT_COST_AGENT_EXECUTION = 100
 
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,6 +105,34 @@ async def execute_task(
     org_id = http_request.headers.get("x-org-id")
     user_role = (http_request.headers.get("x-user-role") or "user").strip().lower()
     is_superuser = (http_request.headers.get("x-is-superuser") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    # Credit pre-check: block zero-credit users
+    is_privileged = is_superuser or user_role in ("platform_owner", "admin")
+    if not is_privileged and user_id and user_id != "anonymous":
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                bal_resp = await client.get(
+                    f"{BILLING_SERVICE_URL}/billing/credits/balance/{user_id}",
+                    timeout=5.0,
+                )
+                if bal_resp.status_code == 200:
+                    bal_data = bal_resp.json()
+                    balance = bal_data.get("balance", 0)
+                    if balance <= 0 and not bal_data.get("unlimited", False):
+                        logger.warning(f"[Credits] User {user_id[:8]}... blocked from agent execution: 0 credits")
+                        return JSONResponse(
+                            status_code=402,
+                            content={
+                                "error": "insufficient_credits",
+                                "detail": "Credits exhausted. Please upgrade your plan or purchase credits to run agents.",
+                                "message": "Credits exhausted. Please upgrade your plan or purchase credits to run agents.",
+                                "action_url": "/pricing",
+                                "required": CREDIT_COST_AGENT_EXECUTION,
+                                "available": balance,
+                            },
+                        )
+        except Exception as e:
+            logger.warning(f"[Credits] Balance check failed for agent execution: {e}")
 
     merged_context: Dict[str, Any] = dict(request.context or {})
     if user_id and "user_id" not in merged_context:

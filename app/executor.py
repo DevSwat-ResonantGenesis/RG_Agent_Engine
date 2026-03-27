@@ -1699,6 +1699,18 @@ Answer questions directly. Only perform actions when explicitly asked."""
         user_id = str(session.user_id) if session.user_id else ""
         _user_keys = await self._fetch_user_byok_keys(user_id)
 
+        # Credit tracking for this session
+        _ctx = session.context or {}
+        _user_role = str(_ctx.get("user_role", "user")).lower()
+        _is_superuser = str(_ctx.get("is_superuser", "")).lower() in ("1", "true", "yes")
+        _unlimited = str(_ctx.get("unlimited_credits", "")).lower() in ("1", "true", "yes")
+        _is_privileged = _is_superuser or _unlimited or _user_role in ("platform_owner", "admin")
+        _has_byok = bool(_user_keys)
+        _credits_used_total = 0
+        _credits_balance = -1  # unknown until first deduction
+        _BILLING_URL = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000")
+        _CREDIT_COST_LLM = 20
+
         # Load safety rules
         await safety_envelope.load_rules(db_session, str(agent.id))
 
@@ -1973,6 +1985,57 @@ Answer questions directly. Only perform actions when explicitly asked."""
             step.tokens_used = step_tokens
             session.total_tokens_used = (session.total_tokens_used or 0) + step_tokens
 
+            # --- Credit deduction per LLM call ---
+            _step_credit_info = {}
+            if not _is_privileged and user_id and user_id != "anonymous":
+                _llm_cost = 0 if _has_byok else _CREDIT_COST_LLM
+                if _llm_cost > 0:
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as _hc:
+                            _dr = await _hc.post(
+                                f"{_BILLING_URL}/billing/credits/deduct",
+                                json={
+                                    "user_id": user_id,
+                                    "amount": _llm_cost,
+                                    "action": "agent_llm_call",
+                                    "description": f"Agent session {session.id} step {session.loop_count}",
+                                    "reference_id": str(session.id),
+                                    "reference_type": "agent_session",
+                                },
+                            )
+                            if _dr.status_code == 200:
+                                _dd = _dr.json()
+                                _credits_balance = _dd.get("balance", 0)
+                                _credits_used_total += _llm_cost
+                                _step_credit_info = {
+                                    "credits_deducted": _llm_cost,
+                                    "credits_balance": _credits_balance,
+                                    "credits_used_total": _credits_used_total,
+                                }
+                                if _credits_balance <= 0:
+                                    _step_credit_info["credit_warning"] = "zero"
+                                elif _credits_balance < 3000:
+                                    _step_credit_info["credit_warning"] = "low"
+                                logger.info(f"[Credits] Session {session.id} step {session.loop_count}: deducted {_llm_cost}, balance={_credits_balance}")
+                            elif _dr.status_code == 402:
+                                _step_credit_info = {"credit_warning": "zero", "credits_balance": 0, "credits_exhausted": True}
+                                logger.warning(f"[Credits] Session {session.id}: credits exhausted mid-loop at step {session.loop_count}")
+                    except Exception as _ce:
+                        logger.warning(f"[Credits] Deduction failed for session {session.id}: {_ce}")
+
+            # Stop execution if credits exhausted mid-loop
+            if _step_credit_info.get("credits_exhausted"):
+                step.reasoning = action.get("reasoning")
+                step.step_type = "respond"
+                step.output_data = {"error": "credits_exhausted", "message": "Credits exhausted during agent execution.", **_step_credit_info}
+                duration_ms = int((time.time() - start_time) * 1000)
+                step.duration_ms = duration_ms
+                session.status = "failed"
+                session.error_message = "Credits exhausted. Please upgrade your plan or purchase credits."
+                session.completed_at = datetime.utcnow()
+                await db_session.commit()
+                return {"error": "credits_exhausted", "credits_balance": 0}
+
             step.reasoning = action.get("reasoning")
             step.step_type = action.get("action", "think")
 
@@ -2169,16 +2232,21 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 session.total_tool_calls += 1
 
             elif action.get("action") == "respond":
-                result = {"response": action.get("response")}
+                result = {"response": action.get("response"), **_step_credit_info}
                 step.output_data = result
                 return {
                     "goal_achieved": action.get("goal_achieved", True),
                     "response": action.get("response"),
+                    "credits_used": _credits_used_total,
+                    "credits_balance": _credits_balance,
                 }
 
             else:  # think
                 result = {"thought": action.get("reasoning")}
 
+            # Merge credit info into step output for SSE streaming
+            if _step_credit_info:
+                result = {**result, **_step_credit_info}
             step.output_data = result
             duration_ms = int((time.time() - start_time) * 1000)
             step.duration_ms = duration_ms
