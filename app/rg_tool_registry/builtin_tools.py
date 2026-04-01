@@ -3,6 +3,7 @@ Built-in Tool Definitions — ALL platform tools in unified ToolDef format.
 Server-side tools (search, memory, agents, media, integrations, etc.)
 IDE-only tools are in builtin_tools_ide.py
 """
+from typing import Dict
 from .registry import ToolDef, ToolParam, ToolCategory, ToolAccess, ParamType
 
 _R = ToolAccess.REGISTERED
@@ -511,6 +512,129 @@ IDE_FILESYSTEM_TOOLS = [
 ]
 
 
+# ── CHAT SKILLS (high-level orchestrator skills for Resonant Chat & AI assistant) ──
+# These are top-level skill entry points that the LLM routes user messages to.
+# Each wraps multiple granular tools into a single user-facing capability.
+CHAT_SKILL_TOOLS = [
+    # --- Analysis ---
+    ToolDef(name="skill_code_visualizer",
+            description="Scan and analyze a GitHub repository or codebase. ONLY when user provides a GitHub URL or explicitly asks to scan/analyze a repo/codebase.",
+            category=ToolCategory.CODE_ANALYSIS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_code_visualizer", access={_R}, priority=5,
+            requires_api_key=None),
+    ToolDef(name="skill_state_physics",
+            description="Open State Physics visualization panel. ONLY when user explicitly says 'open state physics', 'show state physics', or 'state-space visualization'.",
+            category=ToolCategory.STATE_PHYSICS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_state_physics", access={_R}, priority=10),
+    ToolDef(name="skill_sigma",
+            description="Access Sigma Computing dashboards. When user asks about their Sigma reports or analytics.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_integration", access={_R}, priority=15, requires_api_key="sigma"),
+
+    # --- Search ---
+    ToolDef(name="skill_web_search",
+            description="Search the web for real-time information. ONLY for current events, live prices, weather, recent news, or facts that require up-to-date data the AI cannot know.",
+            category=ToolCategory.SEARCH,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_web_search", access={_R, _G}, priority=5,
+            requires_api_key="tavily"),
+
+    # --- Generation ---
+    ToolDef(name="skill_image_generation",
+            description="Generate an image with DALL-E. ONLY when user explicitly asks to generate/create/draw/make an image, picture, or illustration.",
+            category=ToolCategory.MEDIA,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_image_generation", access={_R}, priority=10,
+            requires_api_key="openai"),
+
+    # --- Memory ---
+    ToolDef(name="skill_memory_search",
+            description="Search user's long-term memory for previously stored information. When user asks 'what did I say about X' or 'do you remember X'.",
+            category=ToolCategory.MEMORY,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_memory_search", access={_R}, priority=5),
+    ToolDef(name="skill_memory_library",
+            description="Open the memory library panel. ONLY when user explicitly says 'open memory library', 'show my memories', or 'browse memories'.",
+            category=ToolCategory.MEMORY,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_memory_library", access={_R}, priority=10),
+
+    # --- Agents ---
+    ToolDef(name="skill_agents_os",
+            description="Create, manage, rename, delete, or configure AI agents. ONLY when user explicitly asks to create/build/manage/rename/delete agents or open Agents OS.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_agents_os", access={_R}, priority=5),
+    ToolDef(name="skill_agent_architect",
+            description="Design and build advanced autonomous agents from a high-level description. When user wants a powerful/professional/advanced/autonomous agent built with optimal setup — tools, schedules, budgets, webhooks, goals, API connections. Use this instead of agents_os when user describes WHAT they need (not just 'create agent') and wants smart auto-configuration.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_agent_architect", access={_R}, priority=3),
+
+    # --- Utility ---
+    ToolDef(name="skill_ide_workspace",
+            description="Open the IDE workspace split panel. ONLY when user explicitly says 'open IDE', 'open editor', 'open terminal', or 'open workspace'. Do NOT trigger for coding questions.",
+            category=ToolCategory.DEVELOPER,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_ide_workspace", access={_R}, priority=10),
+    ToolDef(name="skill_rabbit_post",
+            description="Create a post on Rabbit community forum. When user wants to post something to a Rabbit community.",
+            category=ToolCategory.COMMUNITY,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_rabbit_post", access={_R}, priority=10),
+
+    # --- Integrations ---
+    ToolDef(name="skill_google_drive",
+            description="Access Google Drive files. When user asks about their Drive files, documents, or wants to search/read/create files.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_integration", access={_R}, priority=15, requires_api_key="google-drive"),
+    ToolDef(name="skill_google_calendar",
+            description="Access Google Calendar. When user asks about their schedule, events, meetings, or wants to create/view calendar events.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_integration", access={_R}, priority=15, requires_api_key="google-calendar"),
+    ToolDef(name="skill_figma",
+            description="Access Figma designs. When user asks about their Figma projects, design files, or components.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[ToolParam("message", ParamType.STRING, "user message", required=True)],
+            handler="_execute_integration", access={_R}, priority=15, requires_api_key="figma"),
+]
+
+# Mapping: skill_id (used by Resonant Chat) -> unified tool name
+SKILL_ID_TO_TOOL_NAME = {
+    "code_visualizer": "skill_code_visualizer",
+    "web_search": "skill_web_search",
+    "image_generation": "skill_image_generation",
+    "memory_search": "skill_memory_search",
+    "memory_library": "skill_memory_library",
+    "agents_os": "skill_agents_os",
+    "agent_architect": "skill_agent_architect",
+    "state_physics": "skill_state_physics",
+    "ide_workspace": "skill_ide_workspace",
+    "rabbit_post": "skill_rabbit_post",
+    "google_drive": "skill_google_drive",
+    "google_calendar": "skill_google_calendar",
+    "figma": "skill_figma",
+    "sigma": "skill_sigma",
+}
+TOOL_NAME_TO_SKILL_ID = {v: k for k, v in SKILL_ID_TO_TOOL_NAME.items()}
+
+
+def get_chat_skill_descriptions() -> Dict[str, str]:
+    """Build _SKILL_TOOL_DESCRIPTIONS dict from unified CHAT_SKILL_TOOLS.
+    Returns {skill_id: description} for LLM detection in Resonant Chat."""
+    descs = {}
+    for tool in CHAT_SKILL_TOOLS:
+        skill_id = TOOL_NAME_TO_SKILL_ID.get(tool.name)
+        if skill_id:
+            descs[skill_id] = tool.description
+    return descs
+
+
 # ═══════════════════════════════════════════════════════════
 # ALL_TOOLS — single flat list of every tool on the platform
 # ═══════════════════════════════════════════════════════════
@@ -534,6 +658,7 @@ ALL_TOOLS = (
     + TOOL_MANAGEMENT_TOOLS
     + PLATFORM_API_TOOLS
     + IDE_FILESYSTEM_TOOLS
+    + CHAT_SKILL_TOOLS
 )
 
 
