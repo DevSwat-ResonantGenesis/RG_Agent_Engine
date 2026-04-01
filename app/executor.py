@@ -1957,6 +1957,19 @@ Answer questions directly. Only perform actions when explicitly asked."""
         """Execute a single step in the agent loop."""
         start_time = time.time()
 
+        # Derive credit-tracking variables (needed for per-step billing)
+        user_id = str(session.user_id) if session.user_id else ""
+        _ctx = session.context or {}
+        _user_role = str(_ctx.get("user_role", "user")).lower()
+        _is_superuser = str(_ctx.get("is_superuser", "")).lower() in ("1", "true", "yes")
+        _unlimited = str(_ctx.get("unlimited_credits", "")).lower() in ("1", "true", "yes")
+        _is_privileged = _is_superuser or _unlimited or _user_role in ("platform_owner", "admin")
+        _has_byok = bool(user_keys)
+        _credits_used_total = 0
+        _credits_balance = -1
+        _BILLING_URL = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000")
+        _CREDIT_COST_LLM = 20
+
         # Create step record
         step = AgentStep(
             session_id=session.id,
