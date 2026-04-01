@@ -5,6 +5,7 @@ import uuid
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, Text, Boolean, JSON, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from .db import Base
@@ -64,6 +65,10 @@ class AgentDefinition(Base):
     archived_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relationships (back_populates for models_schedule.py)
+    schedules = relationship("AgentSchedule", back_populates="agent", lazy="selectin")
+    triggers = relationship("AgentTrigger", back_populates="agent", lazy="selectin")
 
 
 class AgentVersion(Base):
