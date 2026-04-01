@@ -424,3 +424,5 @@ from .models_autonomy import (
     ApprovalRequest,
     ExecutionAuditEntry,
 )
+
+from .models_schedule import AgentSchedule, AgentTrigger, AgentExecution  # noqa: F401  — register with Base for relationships
