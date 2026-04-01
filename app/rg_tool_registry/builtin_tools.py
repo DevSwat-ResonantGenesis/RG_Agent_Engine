@@ -340,6 +340,56 @@ AGENT_TOOLS_EXTENDED = [
             params=[], handler="_custom_session_log", access={_R}, priority=20),
 ]
 
+# ── AGENT ARCHITECT (meta-agent that creates & configures other agents) ──
+AGENT_ARCHITECT_TOOLS = [
+    ToolDef(name="architect_plan", description="Analyze a user request and produce a JSON blueprint for one or more production-ready agents with optimal tools, models, schedules, goals, and webhooks.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("request", ParamType.STRING, "natural language description of what agents to build", required=True)],
+            handler="_custom_architect_plan", access={_R, _A}, priority=5),
+    ToolDef(name="architect_create_agent", description="Create a fully-configured agent from a blueprint — sets tools, model, provider, system prompt, safety config.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("name", ParamType.STRING, "agent name", required=True),
+                    ToolParam("description", ParamType.STRING, "agent purpose", required=True),
+                    ToolParam("provider", ParamType.STRING, "LLM provider", default="groq"),
+                    ToolParam("model", ParamType.STRING, "model name", default="llama-3.3-70b-versatile"),
+                    ToolParam("tools", ParamType.ARRAY, "tool names to assign", items_type="string"),
+                    ToolParam("mode", ParamType.STRING, "governed or unbounded", default="governed"),
+                    ToolParam("system_prompt", ParamType.STRING, "custom system prompt"),
+                    ToolParam("temperature", ParamType.NUMBER, default=0.6)],
+            handler="_custom_architect_create_agent", access={_R, _A}, priority=5),
+    ToolDef(name="architect_assign_goal", description="Assign a goal to an agent created by Agent Architect.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("goal", ParamType.STRING, "goal description", required=True),
+                    ToolParam("priority", ParamType.INTEGER, "1-10", default=5)],
+            handler="_custom_architect_assign_goal", access={_R, _A}, priority=5),
+    ToolDef(name="architect_create_schedule", description="Create a recurring schedule for an agent — cron or interval.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("name", ParamType.STRING, "schedule name", required=True),
+                    ToolParam("goal", ParamType.STRING, "what to do each run", required=True),
+                    ToolParam("cron_expression", ParamType.STRING, "cron e.g. '0 */6 * * *'"),
+                    ToolParam("interval_seconds", ParamType.INTEGER, "seconds between runs")],
+            handler="_custom_architect_create_schedule", access={_R, _A}, priority=10),
+    ToolDef(name="architect_create_webhook", description="Create a webhook trigger for an agent so it can be invoked externally.",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("name", ParamType.STRING, "webhook name", required=True)],
+            handler="_custom_architect_create_webhook", access={_R, _A}, priority=10),
+    ToolDef(name="architect_set_autonomy", description="Set an agent's autonomy mode (governed, supervised, unbounded).",
+            category=ToolCategory.AGENTS,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("mode", ParamType.STRING, "autonomy mode", required=True, enum=["governed","supervised","unbounded"]),
+                    ToolParam("reason", ParamType.STRING, "why changing mode")],
+            handler="_custom_architect_set_autonomy", access={_R, _A}, priority=10),
+    ToolDef(name="architect_list_available_tools", description="List all tools available to assign to agents.",
+            category=ToolCategory.AGENTS,
+            params=[], handler="_custom_architect_list_tools", access={_R, _A}, priority=15),
+    ToolDef(name="architect_list_providers", description="List available LLM providers and models for agent creation.",
+            category=ToolCategory.AGENTS,
+            params=[], handler="_custom_architect_list_providers", access={_R, _A}, priority=15),
+]
+
 # ── DEVELOPER ──
 DEVELOPER_TOOLS = [
     ToolDef(name="execute_code", description="Run code in Docker sandbox (python/js/bash).", category=ToolCategory.DEVELOPER,
@@ -472,6 +522,7 @@ ALL_TOOLS = (
     + CODE_VISUALIZER_TOOLS
     + AGENT_TOOLS
     + AGENT_TOOLS_EXTENDED
+    + AGENT_ARCHITECT_TOOLS
     + MEDIA_TOOLS
     + INTEGRATION_TOOLS
     + STATE_PHYSICS_TOOLS
