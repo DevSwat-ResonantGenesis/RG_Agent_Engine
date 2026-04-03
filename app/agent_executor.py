@@ -207,17 +207,13 @@ class AgentExecutor:
         preferred_provider: str = None,
         preferred_model: str = None,
     ) -> ExecutionResult:
-        """Execute a task for an agent."""
+        """Execute a task for an agent.
+        
+        Primary path: OpenClaw Gateway runtime (real autonomous loop).
+        Fallback: Legacy prompt→response loop if OpenClaw is unavailable.
+        """
         task_id = str(uuid4())
         start_time = datetime.now(timezone.utc)
-        
-        reasoning_steps = []
-        tools_used = []
-        
-        # Get available tools
-        tools = self.tool_registry.get_all_schemas()
-        if available_tools:
-            tools = [t for t in tools if t["name"] in available_tools]
         
         # Get user API keys if not provided
         if user_id and not user_api_keys:
@@ -240,46 +236,187 @@ class AgentExecutor:
                     duration_ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
                     error="No credits remaining. Please add your own API keys or purchase credits.",
                 )
-        
+
+        # ── PRIMARY: OpenClaw Gateway runtime ──
+        # Real autonomous agent loop: think → pick tools → execute → observe → loop
+        openclaw_result = await self._execute_via_openclaw(
+            agent_id=agent_id,
+            task=task,
+            context=context,
+            preferred_model=preferred_model,
+        )
+        if openclaw_result is not None:
+            # Record on blockchain
+            bc_client = await get_blockchain_client()
+            await bc_client.record_agent_action(
+                agent_id=agent_id,
+                action_type="task_execution",
+                action_data={
+                    "task": task,
+                    "success": openclaw_result.success,
+                    "tools_used": [e.get("name", "?") for e in openclaw_result.tool_events],
+                    "runtime": "openclaw",
+                },
+            )
+            # Record learning
+            learning = get_agent_learning(agent_id)
+            tools_names = [e.get("name", "?") for e in openclaw_result.tool_events]
+            learning.record_experience(
+                task_type="execution",
+                context=context or {},
+                action={"task": task, "tools": tools_names, "runtime": "openclaw"},
+                result={"answer": openclaw_result.output[:500]},
+                success=openclaw_result.success,
+            )
+            # Convert to ExecutionResult
+            reasoning_steps = []
+            if openclaw_result.reasoning:
+                reasoning_steps.append(ReasoningStep(
+                    step_number=1,
+                    thought=openclaw_result.reasoning[:1000],
+                ))
+            for i, evt in enumerate(openclaw_result.tool_events[:20], start=2):
+                reasoning_steps.append(ReasoningStep(
+                    step_number=i,
+                    thought=f"Using tool: {evt.get('name', '?')}",
+                    action=evt.get("name"),
+                    action_input=evt.get("input"),
+                    observation=str(evt.get("output", evt.get("result", "")))[:500],
+                ))
+
+            return ExecutionResult(
+                task_id=task_id,
+                success=openclaw_result.success,
+                output=openclaw_result.output,
+                reasoning_steps=reasoning_steps,
+                tools_used=tools_names,
+                duration_ms=openclaw_result.duration_ms,
+                error=openclaw_result.error,
+            )
+
+        # ── FALLBACK: Legacy prompt→response loop ──
+        logger.warning("[AgentExecutor] OpenClaw unavailable, using legacy loop")
+        return await self._execute_legacy_loop(
+            agent_id=agent_id,
+            task_id=task_id,
+            task=task,
+            context=context,
+            available_tools=available_tools,
+            user_id=user_id,
+            user_api_keys=user_api_keys,
+            preferred_provider=preferred_provider,
+            start_time=start_time,
+        )
+
+    async def _execute_via_openclaw(
+        self,
+        agent_id: str,
+        task: str,
+        context: Dict[str, Any] = None,
+        preferred_model: str = None,
+    ):
+        """Try executing via OpenClaw Gateway. Returns OpenClawResult or None if unavailable."""
+        try:
+            from .openclaw_bridge import get_openclaw_bridge
+            bridge = get_openclaw_bridge()
+
+            # Check health first (fast HTTP check)
+            health = await bridge.health_check()
+            if not health.get("ok"):
+                logger.warning(f"[AgentExecutor] OpenClaw not healthy: {health}")
+                return None
+
+            # Map model preference
+            model = None
+            if preferred_model:
+                model = preferred_model
+            elif context and context.get("model"):
+                model = context["model"]
+
+            # Build session key from agent_id
+            session_key = f"agent:rg-{agent_id[:12]}"
+
+            # Execute through OpenClaw runtime
+            result = await bridge.execute_agent_task(
+                message=task,
+                session_key=session_key,
+                model=model,
+                timeout=300,
+            )
+
+            logger.info(
+                f"[AgentExecutor] OpenClaw execution: success={result.success} "
+                f"tools={len(result.tool_events)} output_len={len(result.output)}"
+            )
+            return result
+
+        except ImportError:
+            logger.warning("[AgentExecutor] openclaw_bridge not available")
+            return None
+        except Exception as e:
+            logger.warning(f"[AgentExecutor] OpenClaw execution failed: {e}")
+            return None
+
+    async def _execute_legacy_loop(
+        self,
+        agent_id: str,
+        task_id: str,
+        task: str,
+        context: Dict[str, Any] = None,
+        available_tools: List[str] = None,
+        user_id: str = None,
+        user_api_keys: Dict[str, str] = None,
+        preferred_provider: str = None,
+        start_time=None,
+    ) -> ExecutionResult:
+        """Legacy execution loop — prompt→response with text-parsed tool calls."""
+        reasoning_steps = []
+        tools_used = []
+
+        # Get available tools
+        tools = self.tool_registry.get_all_schemas()
+        if available_tools:
+            tools = [t for t in tools if t["name"] in available_tools]
+
         # Build initial prompt
         messages = self._build_initial_messages(task, context, tools)
-        
+
         iteration = 0
         final_answer = None
         error = None
-        
+
         while iteration < self.MAX_ITERATIONS:
             iteration += 1
-            
+
             # Get next action from LLM with user context
             response = await self._call_llm(
-                messages, 
-                user_id=user_id, 
+                messages,
+                user_id=user_id,
                 user_api_keys=user_api_keys,
                 preferred_provider=preferred_provider,
             )
-            
+
             if not response:
                 error = "LLM call failed"
                 break
-            
+
             # Parse response
             parsed = self._parse_response(response)
-            
+
             step = ReasoningStep(
                 step_number=iteration,
                 thought=parsed.get("thought", ""),
                 action=parsed.get("action"),
                 action_input=parsed.get("action_input"),
             )
-            
+
             # Check for final answer
             if parsed.get("action") == "final_answer":
                 final_answer = parsed.get("action_input", {}).get("answer")
                 step.observation = "Task completed"
                 reasoning_steps.append(step)
                 break
-            
+
             # Execute tool
             if parsed.get("action"):
                 user_ctx = {
@@ -295,10 +432,10 @@ class AgentExecutor:
                     parsed.get("action_input", {}),
                     user_context=user_ctx,
                 )
-                
+
                 step.observation = str(tool_result.output) if tool_result.success else f"Error: {tool_result.error}"
                 tools_used.append(parsed["action"])
-                
+
                 # Add to messages for next iteration
                 messages.append({
                     "role": "assistant",
@@ -308,13 +445,13 @@ class AgentExecutor:
                     "role": "user",
                     "content": f"Observation: {step.observation}",
                 })
-            
+
             reasoning_steps.append(step)
-        
+
         # Calculate duration
         end_time = datetime.now(timezone.utc)
         duration_ms = int((end_time - start_time).total_seconds() * 1000)
-        
+
         # Record on blockchain
         bc_client = await get_blockchain_client()
         await bc_client.record_agent_action(
@@ -325,9 +462,10 @@ class AgentExecutor:
                 "success": final_answer is not None,
                 "tools_used": tools_used,
                 "iterations": iteration,
+                "runtime": "legacy",
             },
         )
-        
+
         # Record learning
         learning = get_agent_learning(agent_id)
         learning.record_experience(
@@ -337,7 +475,7 @@ class AgentExecutor:
             result={"answer": final_answer},
             success=final_answer is not None,
         )
-        
+
         return ExecutionResult(
             task_id=task_id,
             success=final_answer is not None,
