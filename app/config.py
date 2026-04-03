@@ -37,6 +37,9 @@ class Settings(BaseSettings):
         "",
     )
 
+    # Internal service authentication
+    INTERNAL_SERVICE_KEY: str = os.getenv("INTERNAL_SERVICE_KEY", "")
+
     AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED: bool = os.getenv(
         "AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED",
         "false",

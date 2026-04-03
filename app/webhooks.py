@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .config import get_settings
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +340,6 @@ async def trigger_agent_webhook(
     Internal services can bypass signature verification by providing valid
     X-Internal-Service-Key header (must match INTERNAL_SERVICE_KEY env var).
     """
-    settings = get_settings()
     webhook_path = f"/webhooks/agent/{agent_id}/trigger"
 
     # Find trigger by path
