@@ -352,8 +352,9 @@ async def trigger_agent_webhook(
     if not trigger:
         raise HTTPException(status_code=404, detail="Webhook trigger not found for this agent")
 
-    # Internal services (e.g. discord_bridge) on the Docker network can skip signature validation
-    is_internal = request.headers.get("x-internal-service") == "discord_bridge"
+    # Internal services (e.g. discord_bridge, openclaw_service) on the Docker network can skip signature validation
+    internal_services = {"discord_bridge", "openclaw_service"}
+    is_internal = request.headers.get("x-internal-service") in internal_services
 
     # Verify signature if secret is configured (skip for internal callers)
     if trigger.get("webhook_secret") and not is_internal:
