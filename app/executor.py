@@ -1809,6 +1809,19 @@ Answer questions directly. Only perform actions when explicitly asked."""
         finally:
             self._record_session_learning(session, agent, _result, _step_history, _loop_start)
 
+    # Patterns for empty/meaningless goals that waste tokens
+    _EMPTY_GOAL_PATTERNS = [
+        re.compile(r"^process\s+openclaw\s+event:\s*incoming\s*$", re.IGNORECASE),
+        re.compile(r"^process\s+openclaw\s+event:\s*$", re.IGNORECASE),
+        re.compile(r"^incoming\s*$", re.IGNORECASE),
+        re.compile(r"^event:\s*$", re.IGNORECASE),
+        re.compile(r"^none\s*$", re.IGNORECASE),
+        re.compile(r"^null\s*$", re.IGNORECASE),
+        re.compile(r"^undefined\s*$", re.IGNORECASE),
+        re.compile(r"^test\s*$", re.IGNORECASE),
+        re.compile(r"^\s*$"),
+    ]
+
     async def _run_loop_inner(
         self,
         session: AgentSession,
@@ -1817,9 +1830,28 @@ Answer questions directly. Only perform actions when explicitly asked."""
         _step_history: list,
     ) -> Dict[str, Any]:
         """Inner run loop — separated to enable learning wrapper."""
+        # === EMPTY/MEANINGLESS GOAL INTERCEPTOR ===
+        # Reject goals that are empty, placeholder, or system noise BEFORE wasting tokens.
+        goal_raw = (session.current_goal or "").strip()
+        if not goal_raw or len(goal_raw) < 3:
+            session.status = "failed"
+            session.error_message = "Goal is empty or too short. Please provide a specific task."
+            session.completed_at = datetime.utcnow()
+            await db_session.commit()
+            return {"status": "failed", "error": session.error_message}
+
+        for pattern in self._EMPTY_GOAL_PATTERNS:
+            if pattern.search(goal_raw):
+                print(f"[INTERCEPTOR] Empty/meaningless goal rejected: {goal_raw[:80]}", flush=True)
+                session.status = "failed"
+                session.error_message = f"Goal '{goal_raw[:100]}' is not actionable. Please provide a specific task."
+                session.completed_at = datetime.utcnow()
+                await db_session.commit()
+                return {"status": "failed", "error": session.error_message}
+
         # === IMPOSSIBLE-GOAL INTERCEPTOR ===
         # Catch goals that require capabilities we don't have BEFORE entering the LLM loop.
-        goal_lower = (session.current_goal or "").strip()
+        goal_lower = goal_raw
         for pattern, response_msg in self._IMPOSSIBLE_GOAL_PATTERNS:
             if pattern.search(goal_lower):
                 print(f"[INTERCEPTOR] Goal blocked by impossible-goal pattern: {goal_lower[:80]}", flush=True)

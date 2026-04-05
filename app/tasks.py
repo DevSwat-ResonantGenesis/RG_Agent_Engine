@@ -277,6 +277,24 @@ def check_agent_health() -> Dict[str, Any]:
                     if elapsed > stale_threshold:
                         session.status = "stale"
                         stale_count += 1
+
+            # Also expire WAITING_APPROVAL sessions stuck > 30 minutes
+            approval_timeout = 1800  # 30 minutes
+            result2 = await db_session.execute(
+                select(AgentSession).where(
+                    AgentSession.status == "waiting_approval",
+                )
+            )
+            approval_sessions = result2.scalars().all()
+            for session in approval_sessions:
+                last_activity = session.last_activity_at or session.started_at
+                if last_activity:
+                    elapsed = (now - last_activity).total_seconds()
+                    if elapsed > approval_timeout:
+                        session.status = "failed"
+                        session.error_message = "Approval timeout — no response within 30 minutes"
+                        session.completed_at = now
+                        stale_count += 1
             
             await db_session.commit()
             
@@ -303,10 +321,10 @@ def cleanup_stale_sessions() -> Dict[str, Any]:
         async with async_session_maker() as db_session:
             now = datetime.now(timezone.utc)
             
-            # Find stale sessions older than 1 hour
+            # Find stale sessions older than 1 hour + lingering waiting_approval
             result = await db_session.execute(
                 select(AgentSession).where(
-                    AgentSession.status == "stale",
+                    AgentSession.status.in_(["stale", "waiting_approval"]),
                 )
             )
             sessions = result.scalars().all()

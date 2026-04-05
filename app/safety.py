@@ -301,13 +301,17 @@ class SafetyEnvelope:
             violations.append(f"EXFILTRATION: {desc}")
             self._log_incident(ThreatLevel.HIGH, "exfiltration", desc, action_data, session_id)
 
-        # Sensitive data patterns - require approval
-        sensitive_matches = self._check_patterns(content_to_check, self.SENSITIVE_PATTERNS)
-        if sensitive_matches:
-            for pattern, desc in sensitive_matches:
-                violations.append(f"SENSITIVE DATA: {desc}")
-                self._log_incident(ThreatLevel.MEDIUM, "sensitive_data", desc, action_data, session_id)
-            requires_approval = True
+        # Sensitive data patterns - require approval ONLY for respond/think actions.
+        # Tool calls (web_search, fetch_url, etc.) routinely contain emails, tokens,
+        # API-key-like strings in their results — these are false positives that cause
+        # sessions to get stuck in WAITING_APPROVAL forever.
+        if action_type not in ("tool_call",):
+            sensitive_matches = self._check_patterns(content_to_check, self.SENSITIVE_PATTERNS)
+            if sensitive_matches:
+                for pattern, desc in sensitive_matches:
+                    violations.append(f"SENSITIVE DATA: {desc}")
+                    self._log_incident(ThreatLevel.MEDIUM, "sensitive_data", desc, action_data, session_id)
+                requires_approval = True
 
         # Check URLs in action data
         if "url" in action_data:

@@ -3162,12 +3162,13 @@ async def approve_step(
     session_id: str,
     step_id: str,
     approved: bool = True,
+    background_tasks: BackgroundTasks = None,
     session: AsyncSession = Depends(get_session),
 ):
     """Approve or reject a step requiring approval."""
     await approval_manager.grant_approval(step_id, approved, session)
 
-    # Resume session if approved
+    # Resume session if approved — re-enter the execution loop in background
     if approved:
         result = await session.execute(
             select(AgentSession).where(AgentSession.id == session_id)
@@ -3177,7 +3178,66 @@ async def approve_step(
             agent_session.status = "running"
             await session.commit()
 
+            # Re-enter execution loop in background so the session actually resumes
+            if background_tasks:
+                background_tasks.add_task(_resume_session_after_approval, str(session_id))
+    elif not approved:
+        # Rejected — mark session as failed
+        result = await session.execute(
+            select(AgentSession).where(AgentSession.id == session_id)
+        )
+        agent_session = result.scalar_one_or_none()
+        if agent_session and agent_session.status == "waiting_approval":
+            agent_session.status = "failed"
+            agent_session.error_message = "Step rejected by user"
+            agent_session.completed_at = datetime.utcnow()
+            await session.commit()
+
     return {"status": "approved" if approved else "rejected", "step_id": step_id}
+
+
+async def _resume_session_after_approval(session_id: str):
+    """Background task: re-enter execution loop for an approved session."""
+    try:
+        async with async_session() as db_session:
+            result = await db_session.execute(
+                select(AgentSession).where(AgentSession.id == session_id)
+            )
+            agent_session = result.scalar_one_or_none()
+            if not agent_session or agent_session.status != "running":
+                return
+
+            # Load the agent definition
+            agent_result = await db_session.execute(
+                select(AgentDefinition).where(AgentDefinition.id == agent_session.agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return
+
+            # Re-enter the execution loop
+            await agent_executor._run_loop_inner(
+                session=agent_session,
+                agent=agent,
+                db_session=db_session,
+                _step_history=[],
+            )
+            await db_session.commit()
+    except Exception as e:
+        logger.error(f"Failed to resume session {session_id} after approval: {e}")
+        try:
+            async with async_session() as db_session:
+                result = await db_session.execute(
+                    select(AgentSession).where(AgentSession.id == session_id)
+                )
+                s = result.scalar_one_or_none()
+                if s and s.status == "running":
+                    s.status = "failed"
+                    s.error_message = f"Resume after approval failed: {str(e)[:200]}"
+                    s.completed_at = datetime.utcnow()
+                    await db_session.commit()
+        except Exception:
+            pass
 
 
 # ============== Governance Approvals Endpoints ==============
