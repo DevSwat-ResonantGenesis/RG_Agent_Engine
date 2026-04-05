@@ -4472,10 +4472,31 @@ async def delete_conversation(conv_id: str, request: Request):
 
 async def _save_message(conv_id: str, user_id: str, role: str, content: str,
                         tool_calls: list = None, tool_results: list = None, tokens: int = 0):
-    """Save a message to the DB (fire-and-forget)."""
+    """Save a message to the DB (fire-and-forget).
+
+    Auto-creates the conversation row if it doesn't exist yet (handles
+    stale / externally-generated conversation IDs from the frontend).
+    """
+    if not conv_id:
+        return
     try:
         await _ensure_tables()
         async with _db_engine.begin() as conn:
+            # Ensure conversation row exists (idempotent upsert).
+            # Skip if user_id is not a valid UUID (e.g. "anonymous").
+            _uid = user_id
+            try:
+                import uuid as _uuid_mod
+                _uuid_mod.UUID(_uid)
+            except (ValueError, AttributeError):
+                _uid = None
+            if _uid:
+                await conn.execute(sa_text("""
+                    INSERT INTO agentic_chat_conversations (id, user_id, title)
+                    VALUES (CAST(:cid AS uuid), CAST(:uid AS uuid), :title)
+                    ON CONFLICT (id) DO NOTHING
+                """), {"cid": conv_id, "uid": _uid, "title": content[:80] if role == "user" else "Conversation"})
+
             await conn.execute(sa_text("""
                 INSERT INTO agentic_chat_messages (conversation_id, role, content, tool_calls, tool_results, tokens_used)
                 VALUES (:cid, :role, :content, CAST(:tc AS jsonb), CAST(:tr AS jsonb), :tokens)
@@ -4493,7 +4514,7 @@ async def _save_message(conv_id: str, user_id: str, role: str, content: str,
                 WHERE id = :cid
             """), {"cid": conv_id, "role": role, "content": content})
     except Exception as e:
-        print(f"[SAVE_MSG] Error: {e}", flush=True)
+        logger.warning(f"[SAVE_MSG] Error: {e}")
 
 
 async def _auto_create_conversation(user_id: str, first_message: str) -> str:

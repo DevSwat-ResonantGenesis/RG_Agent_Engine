@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     
     # Safety limits
     MAX_LOOP_ITERATIONS: int = 25
-    MAX_TOKENS_PER_RUN: int = 100000
+    MAX_TOKENS_PER_RUN: int = 500000
     MAX_TOOL_CALLS_PER_STEP: int = 20
     SAFETY_TIMEOUT_SECONDS: int = 300
     
