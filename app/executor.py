@@ -134,7 +134,7 @@ class AgentExecutor:
     # into the system message by _get_next_action).  This template just
     # supplies the current goal, context, history, available tools, and
     # the JSON response format.
-    EXECUTION_FRAME = """Current goal: {goal}
+    EXECUTION_FRAME = """Goal: {goal}
 
 Context:
 {context}
@@ -146,39 +146,20 @@ Available tools:
 {tools}
 
 Rules:
-- "web_search" returns titles + URLs only. Use "fetch_url" to read page content.
-- If a tool call fails ONCE, do NOT retry it. Respond with what you know.
-- Maximum 20 tool calls per session. After that you MUST respond.
-- ONLY use action tools (create_rabbit_post, http_request, etc.) when the goal EXPLICITLY asks you to create, post, send, build, or modify something.
-- If the goal is a question, answer it directly after gathering info. Do NOT invent actions.
-- "http_request" ONLY works with known internal platform APIs (rabbit_api_service, auth_service, etc.). Do NOT invent or guess API endpoints. If you don't know the exact URL, do NOT use http_request.
-- "external_http_request" makes HTTP requests to ANY external URL (APIs, websites, webhooks). Use this for third-party APIs like GitHub, Slack, weather, etc. Supports GET/POST/PUT/PATCH/DELETE with headers and JSON body.
-- "dev_tool" bridges to ED service for file ops, git, docker, testing. Pass {{tool_name: "list"}} to see all, or {{tool_name: "read_file", parameters: {{path: "..."}}}}
-- "execute_code" runs code in a secure Docker sandbox. Supports: python, javascript, bash. Pass {{code, language}}. No network access inside sandbox. Use for data processing, calculations, text manipulation.
-- "figma" accesses Figma API. Pass {{action: "list_files"}} or {{action: "get_file", file_key: "abc123"}} or {{action: "components", file_key: "abc123"}}. Requires user's Figma token (BYOK).
-- "google_calendar" accesses Google Calendar. Pass {{action: "list_events", days: 7}} or {{action: "create_event", title: "Meeting", start: "2026-03-01T10:00:00"}}. Requires Google OAuth token (BYOK).
-- "google_drive" accesses Google Drive. Pass {{action: "list"}} or {{action: "search", query: "quarterly report"}}. Requires Google OAuth token (BYOK).
-- "sigma" accesses Sigma Computing. Pass {{action: "list_workbooks"}} or {{action: "get_workbook", workbook_id: "abc123"}}. Requires Sigma API token (BYOK).
-- "generate_image" creates images via DALL-E 3. Requires user's OpenAI API key (BYOK). If missing key error, tell user to add key in Settings > API Keys.
-- "generate_audio" creates speech audio via OpenAI TTS. Pass text + optional voice (alloy/echo/fable/onyx/nova/shimmer). Requires user's OpenAI key.
-- "generate_music" generates music/songs via Suno API. Requires user's Suno API key (BYOK). If missing key, tell user to add their Suno key.
-- "generate_video" generates video via Replicate API. Requires user's Replicate API key (BYOK). If missing key, tell user to add their Replicate key.
-- If a tool returns a missing API key error, tell the user exactly which key to add in Settings > API Keys. Do NOT retry or loop.
-- If the goal requires a capability you don't have, respond immediately explaining what you can and cannot do. Do NOT loop trying workarounds.
-- "gmail_send" sends an email via Gmail. Pass {{to, subject, body}}. Requires user's Gmail OAuth connection.
-- "gmail_read" reads recent emails from Gmail inbox. Pass {{max_results, query (optional Gmail search)}}. Requires Gmail OAuth.
-- "slack_send_message" sends a message to a Slack channel. Pass {{channel, text}}. Requires user's Slack OAuth connection.
-- "slack_list_channels" lists Slack channels the bot can access. Pass {{limit (optional)}}.
-- "slack_read_messages" reads recent messages from a Slack channel. Pass {{channel, limit (optional)}}.
-- ED Service tools (require workspace_id in tool_input): File ops: "read_file", "write_file", "list_files", "search_files", "search_content", "delete_file". Git: "git_clone", "git_status", "git_add", "git_commit", "git_push", "git_pull", "git_log", "git_diff", "git_checkout". Docker: "docker_build", "docker_run", "docker_stop", "docker_logs", "docker_ps". Testing: "run_pytest", "run_jest", "run_lint", "run_coverage". Also: "validate_code", "trigger_workflow", "ask_llm", "log_insight", "get_current_time".
+- If a tool fails, do NOT retry. Respond with what you know.
+- Max 12 tool calls per session. Then you MUST respond.
+- Only take actions when the goal explicitly asks to create/post/send/modify.
+- Questions: gather info then answer directly.
+- Missing API key error: tell user to add it in Settings > API Keys. Do NOT retry.
+- If you lack a capability, say so immediately. Do NOT loop.
 
 Respond in JSON:
 {{
-    "reasoning": "Your thought process",
-    "action": "tool_call|think|respond",
-    "tool_name": "name of tool if action is tool_call",
+    "reasoning": "brief thought",
+    "action": "tool_call|respond",
+    "tool_name": "tool name if action is tool_call",
     "tool_input": {{}},
-    "response": "final response if action is respond",
+    "response": "final answer if action is respond",
     "goal_achieved": true/false
 }}"""
 
@@ -2341,7 +2322,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
     ) -> Dict[str, Any]:
         """Get the agent's next action using UnifiedLLMClient."""
         tools_desc = self._format_tools(tools)
-        history_str = self._format_history(history[-10:]) if history else "No previous steps."
+        history_str = self._format_history(history[-5:]) if history else "No previous steps."
         context_str = json.dumps(context, indent=2)
 
         system_prompt = agent.system_prompt or self.DEFAULT_SYSTEM_PROMPT
@@ -2640,16 +2621,10 @@ Answer questions directly. Only perform actions when explicitly asked."""
         return specs
 
     def _format_tools(self, tools: List[ToolSpec]) -> str:
-        """Format tools for prompt."""
+        """Format tools for prompt (compact — name + description only)."""
         if not tools:
             return "No tools available."
-        
-        lines = []
-        for tool in tools:
-            lines.append(f"- {tool.name}: {tool.description}")
-            if tool.parameters_schema:
-                lines.append(f"  Parameters: {json.dumps(tool.parameters_schema)}")
-        return "\n".join(lines)
+        return "\n".join(f"- {t.name}: {t.description}" for t in tools)
 
     def _format_history(self, history: List[Dict[str, Any]]) -> str:
         """Format history in a structured way the LLM can learn from."""
@@ -2669,8 +2644,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 result = step.get("result") or {}
                 # Truncate large results
                 result_str = json.dumps(result, ensure_ascii=False)
-                if len(result_str) > 800:
-                    result_str = result_str[:800] + "...(truncated)"
+                if len(result_str) > 400:
+                    result_str = result_str[:400] + "...(truncated)"
                 lines.append(f"Step {i+1}: Used {tool}({json.dumps(tool_input)})")
                 if error:
                     lines.append(f"  ERROR: {error}")

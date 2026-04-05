@@ -87,8 +87,8 @@ class SandboxConfig:
     max_network_requests: int = 100
     max_file_operations: int = 50
     
-    # Network restrictions
-    allowed_hosts: Set[str] = field(default_factory=lambda: {"localhost", "127.0.0.1"})
+    # Network restrictions (empty = allow all public hosts; denied_hosts still blocks)
+    allowed_hosts: Set[str] = field(default_factory=set)
     denied_hosts: Set[str] = field(default_factory=lambda: {"169.254.169.254"})  # AWS metadata
     allowed_ports: Set[int] = field(default_factory=lambda: {80, 443, 8000, 8080})
     
