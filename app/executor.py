@@ -141,10 +141,11 @@ Context:
 Previous steps:
 {history}
 
-You have access to 159+ platform tools. Call any tool by name — the system will execute it.
-Tool categories: search, memory, community, developer, media, integrations, agents, system.
-Examples: web_search, fetch_url, execute_code, generate_image, gmail_send, slack_send, http_request, external_http_request, dev_tool, memory_read, memory_write, create_rabbit_post, google_calendar, figma, etc.
-If a tool doesn't exist yet, use action "create_tool" with name + description to register it.
+You have access to 159+ tools and 44 platform services (560+ APIs). Call any by name.
+Tools: web_search, fetch_url, execute_code, generate_image, gmail_send, slack_send, http_request, dev_tool, memory_read, memory_write, create_rabbit_post, google_calendar, figma, etc.
+APIs: Use discover_services(category="ai|core|agents|community|developer|integrations|blockchain|storage") to find services.
+      Use platform_api(service="name", endpoint="/path", method="GET|POST", body={{...}}) to call any service API.
+      Use discover_api(service="name") to list a service's endpoints.
 
 Rules:
 - Call tools by exact name. If a tool fails, do NOT retry.
@@ -211,6 +212,10 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "google_calendar": self._tool_google_calendar,
             "google_drive": self._tool_google_drive,
             "sigma": self._tool_sigma,
+            # === UNIFIED API CATALOG: Call any platform service API ===
+            "platform_api": self._tool_platform_api,
+            "discover_services": self._tool_discover_services,
+            "discover_api": self._tool_discover_api,
         }
 
         # Tool-level sandbox boundary: rate limiting, arg validation, resource access control
@@ -1292,6 +1297,146 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 return resp.json()
         except Exception as e:
             return {"error": f"ED tool '{tool_name}' failed: {e}"}
+
+    # ------------------------------------------------------------------
+    # Unified API Catalog: platform_api, discover_services, discover_api
+    # ------------------------------------------------------------------
+
+    async def _tool_platform_api(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Call ANY platform service API by service name + endpoint.
+
+        Usage: {service: "memory", endpoint: "/memories/search", method: "POST", body: {query: "..."}}
+        """
+        from .rg_tool_registry.api_catalog import get_service, SERVICES
+
+        service_name = (tool_input or {}).get("service", "").strip()
+        endpoint = (tool_input or {}).get("endpoint", "").strip()
+        method = (tool_input or {}).get("method", "GET").upper()
+        body = (tool_input or {}).get("body") or (tool_input or {}).get("params") or {}
+        headers_extra = (tool_input or {}).get("headers") or {}
+
+        if not service_name:
+            return {"error": f"Missing 'service'. Available: {', '.join(sorted(SERVICES.keys()))}"}
+        if not endpoint:
+            return {"error": "Missing 'endpoint'. Example: /health, /agents/, /memories/search"}
+
+        svc = get_service(service_name)
+        if not svc:
+            return {"error": f"Service '{service_name}' not found. Available: {', '.join(sorted(SERVICES.keys()))}"}
+
+        url = f"{svc.url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+        headers = {"Content-Type": "application/json"}
+        internal_key = os.getenv("INTERNAL_SERVICE_KEY") or os.getenv("AUTH_INTERNAL_SERVICE_KEY", "")
+        if internal_key:
+            headers["x-internal-service-key"] = internal_key
+        if session and session.user_id:
+            headers["x-user-id"] = str(session.user_id)
+        headers.update(headers_extra)
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.request(method=method, url=url, json=body if method in ("POST", "PUT", "PATCH") else None,
+                                            params=body if method == "GET" else None, headers=headers)
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {"raw": resp.text[:2000]}
+
+                if resp.status_code < 400:
+                    return {"success": True, "status": resp.status_code, "data": data}
+                return {"error": f"HTTP {resp.status_code}", "data": data}
+        except httpx.ConnectError:
+            return {"error": f"Service '{service_name}' unreachable at {svc.url}"}
+        except Exception as e:
+            return {"error": f"platform_api failed: {str(e)[:300]}"}
+
+    async def _tool_discover_services(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Discover available platform services by category.
+
+        Usage: {} (no params = all) or {category: "ai"} or {search: "memory"}
+        """
+        from .rg_tool_registry.api_catalog import get_all_services, get_services_by_category, ServiceCategory
+
+        category = (tool_input or {}).get("category", "").strip().lower()
+        search = (tool_input or {}).get("search", "").strip().lower()
+
+        if category:
+            try:
+                cat = ServiceCategory(category)
+                services = get_services_by_category(cat)
+            except ValueError:
+                return {"error": f"Unknown category '{category}'. Valid: {', '.join(c.value for c in ServiceCategory)}"}
+        else:
+            services = get_all_services()
+
+        if search:
+            services = [s for s in services if search in s.name.lower() or search in s.description.lower()
+                        or any(search in c.lower() for c in s.capabilities)]
+
+        return {
+            "services": [
+                {
+                    "name": s.name,
+                    "category": s.category.value,
+                    "description": s.description,
+                    "capabilities": s.capabilities[:8],
+                }
+                for s in services
+            ],
+            "total": len(services),
+            "hint": "Use platform_api(service='name', endpoint='/path', method='GET|POST') to call any service",
+        }
+
+    async def _tool_discover_api(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Discover endpoints for a specific service by hitting its /openapi.json or /docs.
+
+        Usage: {service: "agent_engine"} or {service: "memory", search: "search"}
+        """
+        from .rg_tool_registry.api_catalog import get_service, SERVICES
+
+        service_name = (tool_input or {}).get("service", "").strip()
+        search = (tool_input or {}).get("search", "").strip().lower()
+
+        if not service_name:
+            return {"error": f"Missing 'service'. Available: {', '.join(sorted(SERVICES.keys()))}"}
+
+        svc = get_service(service_name)
+        if not svc:
+            return {"error": f"Service '{service_name}' not found. Available: {', '.join(sorted(SERVICES.keys()))}"}
+
+        # Try to fetch the OpenAPI spec
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{svc.url.rstrip('/')}/openapi.json")
+                if resp.status_code == 200:
+                    spec = resp.json()
+                    paths = spec.get("paths", {})
+                    endpoints = []
+                    for path, methods in paths.items():
+                        for method, details in methods.items():
+                            if method in ("get", "post", "put", "patch", "delete"):
+                                summary = details.get("summary", "") or details.get("description", "")[:80]
+                                if search and search not in path.lower() and search not in summary.lower():
+                                    continue
+                                endpoints.append({"method": method.upper(), "path": path, "summary": summary})
+                    return {
+                        "service": service_name,
+                        "url": svc.url,
+                        "endpoints": endpoints[:50],
+                        "total": len(endpoints),
+                    }
+        except Exception:
+            pass
+
+        # Fallback: return known capabilities from catalog
+        return {
+            "service": service_name,
+            "url": svc.url,
+            "description": svc.description,
+            "capabilities": svc.capabilities,
+            "note": "OpenAPI spec not available — use capabilities as guidance for endpoint names",
+        }
 
     async def _get_user_api_key(self, session: Optional[AgentSession], provider: str) -> Optional[str]:
         """Fetch the user's API key for a given provider from auth_service (BYOK)."""
