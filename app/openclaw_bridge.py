@@ -55,7 +55,10 @@ class OpenClawResult:
 
 class OpenClawBridge:
     """
-    WebSocket RPC bridge to OpenClaw Gateway.
+    Bidirectional WebSocket RPC bridge to OpenClaw Gateway.
+
+    OUTBOUND: Platform → OpenClaw (execute_agent_task)
+    INBOUND:  OpenClaw → Platform (tool_request → execute via handler map → tool_result)
 
     Usage:
         bridge = OpenClawBridge()
@@ -74,6 +77,7 @@ class OpenClawBridge:
         self.gateway_url = gateway_url
         self.gateway_token = gateway_token
         self._request_id = 0
+        self._tool_executor = None  # Lazy-loaded executor reference
 
     def _next_id(self) -> str:
         self._request_id += 1
@@ -91,6 +95,9 @@ class OpenClawBridge:
             timeout=OPENCLAW_CONNECT_TIMEOUT,
         )
 
+        # Build list of platform tools available for bidirectional calls
+        platform_tools = self._get_platform_tool_names()
+
         # Send connect frame (required first frame)
         connect_msg = {
             "type": "req",
@@ -100,10 +107,12 @@ class OpenClawBridge:
                 "auth": {"token": self.gateway_token} if self.gateway_token else {},
                 "client": {
                     "name": "rg-agent-engine",
-                    "version": "1.0.0",
+                    "version": "2.0.0",
                     "platform": "linux",
+                    "capabilities": ["bidirectional_tools", "platform_api"],
                 },
                 "deviceId": f"rg-engine-{uuid.uuid4().hex[:12]}",
+                "platformTools": platform_tools,
             },
         }
         await ws.send(json.dumps(connect_msg))
@@ -215,10 +224,21 @@ class OpenClawBridge:
                         logger.error(f"[OpenClaw] Agent request failed: {error_msg}")
                         break
 
+                # Handle inbound tool requests (OpenClaw → Platform)
+                elif msg_type == "req" and msg.get("method") in ("tool_call", "platform_tool", "tool_request"):
+                    tool_result = await self._handle_platform_tool_call(msg, session_key)
+                    await ws.send(json.dumps(tool_result))
+                    continue
+
                 # Handle streaming events
                 elif msg_type == "event":
                     event_name = msg.get("event", "")
                     payload = msg.get("payload", {})
+
+                    # Intercept tool_request events (alternative event-based protocol)
+                    if event_name in ("agent:tool_request", "tool_request", "platform_tool_call"):
+                        tool_result = await self._handle_platform_tool_event(payload, ws, session_key)
+                        continue
 
                     if event_name == "agent:tool" or "tool" in event_name:
                         tool_events.append(payload)
@@ -369,6 +389,150 @@ class OpenClawBridge:
         finally:
             if ws and not ws.closed:
                 await ws.close()
+
+    # ------------------------------------------------------------------
+    # Bidirectional Tool Bridge: OpenClaw → Platform tool execution
+    # ------------------------------------------------------------------
+
+    def _get_platform_tool_names(self) -> List[str]:
+        """Get all platform tool names from unified registry + handler map."""
+        try:
+            from .executor import AgentExecutor
+            if not self._tool_executor:
+                self._tool_executor = AgentExecutor()
+            names = sorted(self._tool_executor._handler_map.keys())
+            # Also include ED service tools
+            names.extend(sorted(self._tool_executor.ED_SERVICE_TOOLS))
+            # Also include platform API meta-tools
+            for meta in ("platform_api", "discover_services", "discover_api"):
+                if meta not in names:
+                    names.append(meta)
+            return names
+        except Exception as e:
+            logger.warning(f"[OpenClaw] Failed to load platform tool names: {e}")
+            return []
+
+    def _get_executor(self):
+        """Lazy-load the AgentExecutor for tool dispatch."""
+        if not self._tool_executor:
+            try:
+                from .executor import AgentExecutor
+                self._tool_executor = AgentExecutor()
+            except Exception as e:
+                logger.error(f"[OpenClaw] Failed to create executor: {e}")
+        return self._tool_executor
+
+    async def _execute_platform_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a platform tool and return the result."""
+        executor = self._get_executor()
+        if not executor:
+            return {"error": "Platform executor not available"}
+
+        # Check handler map first
+        handler = executor._handler_map.get(tool_name)
+        if handler:
+            try:
+                return await handler(tool_input, session=None)
+            except Exception as e:
+                return {"error": f"Tool '{tool_name}' failed: {str(e)}"}
+
+        # Try ED service proxy
+        if tool_name in executor.ED_SERVICE_TOOLS:
+            try:
+                result = await executor._proxy_to_ed_service(tool_name, tool_input or {}, session=None)
+                if result is not None:
+                    return result
+            except Exception as e:
+                return {"error": f"ED service proxy failed for '{tool_name}': {str(e)}"}
+
+        return {"error": f"Tool '{tool_name}' not found on platform"}
+
+    async def _handle_platform_tool_call(self, msg: Dict[str, Any], session_key: str) -> Dict[str, Any]:
+        """Handle an inbound RPC tool_call request from OpenClaw agent.
+
+        Protocol: {type:"req", id:"x", method:"tool_call", params:{tool_name, tool_input}}
+        Response: {type:"res", id:"x", ok:true, payload:{result}}
+        """
+        req_id = msg.get("id", "unknown")
+        params = msg.get("params", {})
+        tool_name = params.get("tool_name", params.get("name", ""))
+        tool_input = params.get("tool_input", params.get("input", params.get("parameters", {})))
+
+        logger.info(f"[OpenClaw←] Platform tool request: {tool_name} (session={session_key})")
+
+        if not tool_name:
+            return {"type": "res", "id": req_id, "ok": False, "error": "Missing tool_name"}
+
+        result = await self._execute_platform_tool(tool_name, tool_input)
+
+        has_error = isinstance(result, dict) and result.get("error")
+        logger.info(
+            f"[OpenClaw←] Tool result: {tool_name} "
+            f"{'ERROR: ' + result.get('error', '')[:80] if has_error else 'OK'}"
+        )
+
+        return {
+            "type": "res",
+            "id": req_id,
+            "ok": not has_error,
+            "payload": result if not has_error else None,
+            "error": result.get("error") if has_error else None,
+        }
+
+    async def _handle_platform_tool_event(
+        self, payload: Dict[str, Any], ws, session_key: str,
+    ) -> Dict[str, Any]:
+        """Handle event-based tool request (alternative to RPC).
+
+        Event: {type:"event", event:"tool_request", payload:{request_id, tool_name, tool_input}}
+        Response sent as: {type:"event", event:"tool_result", payload:{request_id, result}}
+        """
+        request_id = payload.get("request_id", payload.get("id", uuid.uuid4().hex[:8]))
+        tool_name = payload.get("tool_name", payload.get("name", ""))
+        tool_input = payload.get("tool_input", payload.get("input", payload.get("parameters", {})))
+
+        logger.info(f"[OpenClaw←] Platform tool event: {tool_name} req_id={request_id}")
+
+        if not tool_name:
+            result = {"error": "Missing tool_name in tool_request event"}
+        else:
+            result = await self._execute_platform_tool(tool_name, tool_input)
+
+        # Send result back as an event
+        result_msg = {
+            "type": "event",
+            "event": "tool_result",
+            "payload": {
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "result": result,
+                "success": not (isinstance(result, dict) and result.get("error")),
+            },
+        }
+        await ws.send(json.dumps(result_msg))
+        return result
+
+    async def list_platform_tools(self) -> Dict[str, Any]:
+        """Return all platform tools available for OpenClaw agents (REST endpoint helper)."""
+        try:
+            from .rg_tool_registry.builtin_tools import build_registry
+            registry = build_registry()
+            tools = []
+            for td in registry.get_all():
+                tools.append({
+                    "name": td.name,
+                    "description": td.description,
+                    "category": td.category.value if td.category else "general",
+                })
+            # Add platform API meta-tools
+            tools.extend([
+                {"name": "platform_api", "description": "Call any platform service API by name+endpoint", "category": "platform_api"},
+                {"name": "discover_services", "description": "Browse platform services by category", "category": "platform_api"},
+                {"name": "discover_api", "description": "List endpoints for a specific platform service", "category": "platform_api"},
+            ])
+            return {"tools": tools, "total": len(tools)}
+        except Exception as e:
+            return {"tools": [], "total": 0, "error": str(e)}
 
 
 # ── Singleton ───────────────────────────────────────────────────

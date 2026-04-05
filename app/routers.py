@@ -1967,6 +1967,53 @@ async def list_available_tools():
     ]
 
 
+@router.post("/tools/execute")
+async def execute_tool_direct(request: Request):
+    """Execute a platform tool directly (no agent session required).
+
+    Used by OpenClaw service, external integrations, and inter-service calls.
+    Body: {tool_name: str, tool_input: dict}
+    """
+    from .executor import AgentExecutor
+
+    body = await request.json()
+    tool_name = body.get("tool_name", "").strip()
+    tool_input = body.get("tool_input", body.get("parameters", {}))
+
+    if not tool_name:
+        raise HTTPException(status_code=400, detail="Missing tool_name")
+
+    executor = AgentExecutor()
+
+    # Handler map
+    handler = executor._handler_map.get(tool_name)
+    if handler:
+        try:
+            result = await handler(tool_input, session=None)
+            return {"success": True, "tool_name": tool_name, "result": result}
+        except Exception as e:
+            return {"success": False, "tool_name": tool_name, "error": str(e)}
+
+    # ED service proxy
+    if tool_name in executor.ED_SERVICE_TOOLS:
+        try:
+            result = await executor._proxy_to_ed_service(tool_name, tool_input or {}, session=None)
+            if result is not None:
+                return {"success": True, "tool_name": tool_name, "result": result}
+        except Exception as e:
+            return {"success": False, "tool_name": tool_name, "error": str(e)}
+
+    raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
+
+
+@router.get("/tools/list")
+async def list_platform_tools_for_openclaw():
+    """List all platform tools with descriptions (used by OpenClaw federation)."""
+    from .openclaw_bridge import get_openclaw_bridge
+    bridge = get_openclaw_bridge()
+    return await bridge.list_platform_tools()
+
+
 @router.get("/capabilities")
 async def list_agent_capabilities():
     from .agent_executor import get_agent_executor
