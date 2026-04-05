@@ -22,7 +22,6 @@ import httpx
 
 from .config import settings
 from .models import AgentPlan
-from .tool_spec import ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ Respond in the same JSON format as before."""
     async def create_plan(
         self,
         goal: str,
-        available_tools: List[ToolSpec],
+        available_tools: List[str],
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create an execution plan for a goal."""
@@ -128,7 +127,7 @@ Respond in the same JSON format as before."""
         current_plan: Dict[str, Any],
         completed_steps: List[Dict[str, Any]],
         issue: str,
-        available_tools: List[ToolSpec],
+        available_tools: List[str],
     ) -> Dict[str, Any]:
         """Revise a plan based on execution feedback."""
         prompt = self.REPLANNING_PROMPT.format(
@@ -157,7 +156,7 @@ Respond in the same JSON format as before."""
         plan: Dict[str, Any],
         current_step_index: int,
         execution_context: Dict[str, Any],
-        available_tools: List[ToolSpec],
+        available_tools: List[str],
     ) -> Optional[Dict[str, Any]]:
         """Select the next action to execute based on plan and context."""
         steps = plan.get("steps", [])
@@ -176,10 +175,6 @@ Respond in the same JSON format as before."""
         # Prepare action
         tool_name = current_step.get("tool")
         if tool_name:
-            tool = next((t for t in available_tools if t.name == tool_name), None)
-            if not tool:
-                return {"error": f"Tool not found: {tool_name}"}
-            
             return {
                 "action": "tool_call",
                 "tool": tool_name,
@@ -192,19 +187,11 @@ Respond in the same JSON format as before."""
             "description": current_step.get("description"),
         }
 
-    def _format_tools(self, tools: List[ToolSpec]) -> str:
-        """Format tools for prompt inclusion."""
+    def _format_tools(self, tools: List[str]) -> str:
+        """Format tool names for prompt (compact list)."""
         if not tools:
             return "No tools available."
-        
-        lines = []
-        for tool in tools:
-            params = tool.parameters_schema or {}
-            lines.append(f"- {tool.name}: {tool.description}")
-            if params:
-                lines.append(f"  Parameters: {json.dumps(params)}")
-        
-        return "\n".join(lines)
+        return ", ".join(tools)
 
 
 class GoalDecomposer:

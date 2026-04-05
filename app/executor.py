@@ -25,7 +25,6 @@ from .models import (
     AgentDefinition, AgentSession, AgentStep, AgentPlan,
     ToolDefinition, WorkflowTrigger
 )
-from .tool_spec import ToolSpec
 from .safety import safety_envelope, approval_manager
 from .planner import tool_planner, goal_decomposer
 from .verifier import verifier_agent, VerificationResult, VerificationReport
@@ -142,22 +141,23 @@ Context:
 Previous steps:
 {history}
 
-Available tools:
-{tools}
+You have access to 159+ platform tools. Call any tool by name — the system will execute it.
+Tool categories: search, memory, community, developer, media, integrations, agents, system.
+Examples: web_search, fetch_url, execute_code, generate_image, gmail_send, slack_send, http_request, external_http_request, dev_tool, memory_read, memory_write, create_rabbit_post, google_calendar, figma, etc.
+If a tool doesn't exist yet, use action "create_tool" with name + description to register it.
 
 Rules:
-- If a tool fails, do NOT retry. Respond with what you know.
+- Call tools by exact name. If a tool fails, do NOT retry.
 - Max 12 tool calls per session. Then you MUST respond.
 - Only take actions when the goal explicitly asks to create/post/send/modify.
 - Questions: gather info then answer directly.
-- Missing API key error: tell user to add it in Settings > API Keys. Do NOT retry.
-- If you lack a capability, say so immediately. Do NOT loop.
+- Missing API key: tell user to add it in Settings > API Keys.
 
 Respond in JSON:
 {{
     "reasoning": "brief thought",
     "action": "tool_call|respond",
-    "tool_name": "tool name if action is tool_call",
+    "tool_name": "exact tool name",
     "tool_input": {{}},
     "response": "final answer if action is respond",
     "goal_achieved": true/false
@@ -168,36 +168,50 @@ You can use tools to research information and take actions.
 Answer questions directly. Only perform actions when explicitly asked."""
 
     def __init__(self):
-        self.tool_handlers: Dict[str, callable] = {}
-        self.register_tool_handler("web_search", self._tool_web_search)
-        self.register_tool_handler("fetch_url", self._tool_fetch_url)
-        self.register_tool_handler("memory.read", self._tool_memory_read)
-        self.register_tool_handler("memory.write", self._tool_memory_write)
-        # Platform action tools (backed by shared/tools/)
-        self.register_tool_handler("create_rabbit_post", self._tool_create_rabbit_post)
-        self.register_tool_handler("list_rabbit_communities", self._tool_list_rabbit_communities)
-        self.register_tool_handler("create_rabbit_community", self._tool_create_rabbit_community)
-        self.register_tool_handler("http_request", self._tool_http_request)
-        self.register_tool_handler("generate_image", self._tool_generate_image)
-        self.register_tool_handler("generate_audio", self._tool_generate_audio)
-        self.register_tool_handler("generate_music", self._tool_generate_music)
-        self.register_tool_handler("generate_video", self._tool_generate_video)
-        # Phase 2.5: Gmail + Slack tools (backed by shared/tools/)
-        self.register_tool_handler("gmail_send", self._tool_gmail_send)
-        self.register_tool_handler("gmail_read", self._tool_gmail_read)
-        self.register_tool_handler("slack_send_message", self._tool_slack_send_message)
-        self.register_tool_handler("slack_list_channels", self._tool_slack_list_channels)
-        self.register_tool_handler("slack_read_messages", self._tool_slack_read_messages)
-        # Phase 0 tools: external HTTP + code execution
-        self.register_tool_handler("external_http_request", self._tool_external_http_request)
-        self.register_tool_handler("execute_code", self._tool_execute_code)
-        # Phase 0.4: Integration skill tools (Figma, Google Calendar, Google Drive, Sigma)
-        self.register_tool_handler("figma", self._tool_figma)
-        self.register_tool_handler("google_calendar", self._tool_google_calendar)
-        self.register_tool_handler("google_drive", self._tool_google_drive)
-        self.register_tool_handler("sigma", self._tool_sigma)
-        # ED service bridge: file ops, git, docker, testing
-        self.register_tool_handler("dev_tool", self._tool_dev_bridge)
+        # === UNIFIED TOOL REGISTRY: Single source of truth ===
+        from .rg_tool_registry.builtin_tools import build_registry
+        self._registry = build_registry()
+
+        # Handler map: tool_name → executor method
+        # The _tool_* methods contain the actual implementation logic.
+        # This map wires them to the unified registry tool names.
+        self._handler_map: Dict[str, callable] = {
+            # Search
+            "web_search": self._tool_web_search,
+            "fetch_url": self._tool_fetch_url,
+            "read_webpage": self._tool_fetch_url,
+            # Memory
+            "memory_read": self._tool_memory_read,
+            "memory.read": self._tool_memory_read,
+            "memory_write": self._tool_memory_write,
+            "memory.write": self._tool_memory_write,
+            # Community
+            "create_rabbit_post": self._tool_create_rabbit_post,
+            "list_rabbit_communities": self._tool_list_rabbit_communities,
+            "create_rabbit_community": self._tool_create_rabbit_community,
+            # Developer
+            "http_request": self._tool_http_request,
+            "external_http_request": self._tool_external_http_request,
+            "execute_code": self._tool_execute_code,
+            "dev_tool": self._tool_dev_bridge,
+            # Media
+            "generate_image": self._tool_generate_image,
+            "generate_audio": self._tool_generate_audio,
+            "generate_music": self._tool_generate_music,
+            "generate_video": self._tool_generate_video,
+            # Integrations
+            "gmail_send": self._tool_gmail_send,
+            "gmail_read": self._tool_gmail_read,
+            "slack_send": self._tool_slack_send_message,
+            "slack_send_message": self._tool_slack_send_message,
+            "slack_list_channels": self._tool_slack_list_channels,
+            "slack_read": self._tool_slack_read_messages,
+            "slack_read_messages": self._tool_slack_read_messages,
+            "figma": self._tool_figma,
+            "google_calendar": self._tool_google_calendar,
+            "google_drive": self._tool_google_drive,
+            "sigma": self._tool_sigma,
+        }
 
         # Tool-level sandbox boundary: rate limiting, arg validation, resource access control
         if SANDBOX_BOUNDARY_AVAILABLE and create_default_sandbox:
@@ -1699,14 +1713,11 @@ Answer questions directly. Only perform actions when explicitly asked."""
         session.status = "running"
         await db_session.commit()
 
-        # Load available tools based on agent's tool_mode
-        tool_mode = getattr(agent, 'tool_mode', None) or 'smart'
-        tools = await self._load_tools(agent.tools or [], db_session, tool_mode=tool_mode)
-
-        # Create initial plan
+        # Create initial plan (tool names from unified registry)
+        _tool_names = [t.name for t in self._registry.get_all()]
         plan_data = await tool_planner.create_plan(
             goal=session.current_goal,
-            available_tools=tools,
+            available_tools=_tool_names,
             context=session.context,
         )
 
@@ -1750,7 +1761,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 step_result = await self._execute_step(
                     session=session,
                     agent=agent,
-                    tools=tools,
                     history=history,
                     db_session=db_session,
                     user_keys=_user_keys,
@@ -1810,7 +1820,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
                         current_plan=plan_data,
                         completed_steps=history,
                         issue=f"Stability issue: {stability.reason}",
-                        available_tools=tools,
+                        available_tools=_tool_names,
                     )
                     plan.plan_data = plan_data
                     plan.steps = plan_data.get("steps", [])
@@ -1890,7 +1900,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
                             current_plan=plan_data,
                             completed_steps=history,
                             issue=error,
-                            available_tools=tools,
+                            available_tools=_tool_names,
                         )
                         plan.plan_data = plan_data
                         plan.steps = plan_data.get("steps", [])
@@ -1930,7 +1940,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
         self,
         session: AgentSession,
         agent: AgentDefinition,
-        tools: List[ToolSpec],
         history: List[Dict[str, Any]],
         db_session: AsyncSession,
         user_keys: Optional[Dict[str, str]] = None,
@@ -1969,7 +1978,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 goal=session.current_goal,
                 context=session.context,
                 history=history,
-                tools=tools,
                 user_keys=user_keys,
             )
             logger.info(f"Session {session.id} step {session.loop_count}: action={action.get('action')} tool={action.get('tool_name')}")
@@ -2070,23 +2078,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 risk_level = risk_map.get(action_risk, RiskLevel.LOW)
 
                 tool_name = str(action.get("tool_name", "")) if action.get("action") == "tool_call" else ""
-                # Tools that are safe to auto-execute without approval
-                auto_approve_tools = (
-                    "web_search", "fetch_url", "memory.read", "memory.write",
-                    "create_rabbit_post", "list_rabbit_communities",
-                    "create_rabbit_community", "http_request",
-                    "execute_code", "external_http_request",
-                    "figma", "google_calendar", "google_drive", "sigma",
-            "dev_tool",
-                    # ED Service tools (Phase 1.3)
-                    "validate_code", "read_file", "list_files", "search_files",
-                    "search_content", "memory_search", "memory_store",
-                    "trigger_workflow", "ask_llm", "log_insight", "get_current_time",
-                    "git_status", "git_log", "git_diff", "git_branch",
-                    "docker_ps", "docker_images", "docker_logs",
-                    "run_pytest", "run_jest", "run_lint", "run_coverage",
-                )
-                if tool_name in auto_approve_tools:
+                # ALL platform tools are auto-approved (security at sandbox layer)
+                if tool_name:
                     risk_level = RiskLevel.LOW
                 
                 gate_request = ExecutionRequest(
@@ -2097,10 +2090,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
                     risk_level=risk_level,
                     estimated_cost=self._estimate_action_cost(action) if hasattr(self, '_estimate_action_cost') else 0.0,
                     requires_financial=action.get("action") == "tool_call" and "payment" in str(action.get("tool_name", "")),
-                    requires_real_world_effect=(
-                        action.get("action") == "tool_call"
-                        and tool_name not in auto_approve_tools
-                    ),
+                    requires_real_world_effect=False,
                     parameters=action.get("tool_input", {}),
                 )
                 
@@ -2217,7 +2207,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 result = await self._execute_tool(
                     tool_name=action.get("tool_name"),
                     tool_input=action.get("tool_input", {}),
-                    tools=tools,
                     session=session,
                 )
                 step.tool_name = action.get("tool_name")
@@ -2317,11 +2306,9 @@ Answer questions directly. Only perform actions when explicitly asked."""
         goal: str,
         context: Dict[str, Any],
         history: List[Dict[str, Any]],
-        tools: List[ToolSpec],
         user_keys: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Get the agent's next action using UnifiedLLMClient."""
-        tools_desc = self._format_tools(tools)
         history_str = self._format_history(history[-5:]) if history else "No previous steps."
         context_str = json.dumps(context, indent=2)
 
@@ -2331,14 +2318,12 @@ Answer questions directly. Only perform actions when explicitly asked."""
             goal=goal,
             context=context_str,
             history=history_str,
-            tools=tools_desc,
         )
 
         # Phase 2.4: Inject learning recommendations into prompt
         try:
             ll = get_learning_loop()
-            tool_names = [t.get("name", "") for t in tools] if isinstance(tools, list) else []
-            recs = ll.get_recommendations(goal, tool_names)
+            recs = ll.get_recommendations(goal, list(self._handler_map.keys()))
             if recs.get("confidence", 0) > 0.3:
                 hints = []
                 for seq in recs.get("suggested_sequences", [])[:2]:
@@ -2399,7 +2384,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
         self,
         tool_name: str,
         tool_input: Dict[str, Any],
-        tools: List[ToolSpec],
         session: AgentSession,
     ) -> Dict[str, Any]:
         """Execute a tool and return the result (with observability)."""
@@ -2422,7 +2406,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
             tool_name, user_id=str(_user_id), agent_id=str(_agent_id),
             loop_number=_loop_num, args=tool_input,
         ) as _obs:
-            result = await self._execute_tool_inner(tool_name, tool_input, tools, session)
+            result = await self._execute_tool_inner(tool_name, tool_input, session)
             if isinstance(result, dict) and result.get("error"):
                 _obs.set_error(result["error"])
             else:
@@ -2433,84 +2417,41 @@ Answer questions directly. Only perform actions when explicitly asked."""
         self,
         tool_name: str,
         tool_input: Dict[str, Any],
-        tools: List[ToolSpec],
         session: AgentSession,
     ) -> Dict[str, Any]:
-        """Inner tool execution logic (called by _execute_tool with observability wrapper)."""
-        tool = next((t for t in tools if t.name == tool_name), None)
+        """Dispatch tool execution through unified registry + handler map."""
 
-        # Fallback: if tool not in the list but we have an internal handler, use it
-        if not tool:
-            handler = self.tool_handlers.get(tool_name)
-            if handler:
-                logger.info(f"Tool '{tool_name}' not in tools list but has internal handler — executing directly")
-                try:
-                    return await handler(tool_input, session=session)
-                except Exception as e:
-                    return {"error": str(e)}
-            # Phase 1.3: Proxy to ed_service for file/git/docker/workflow tools
-            logger.info(f"Tool '{tool_name}' not found locally — trying ed_service proxy")
+        # 1. Check handler map (executor-implemented tools)
+        handler = self._handler_map.get(tool_name)
+        if handler:
+            try:
+                return await handler(tool_input, session=session)
+            except Exception as e:
+                return {"error": str(e)}
+
+        # 2. Proxy to ed_service for file/git/docker/workflow tools
+        if tool_name in self.ED_SERVICE_TOOLS:
             try:
                 ed_result = await self._proxy_to_ed_service(tool_name, tool_input or {}, session=session)
                 if ed_result is not None:
                     return ed_result
             except Exception as e:
                 logger.warning(f"ed_service proxy failed for '{tool_name}': {e}")
-            logger.warning(f"Tool '{tool_name}' not found in tools list ({[t.name for t in tools]}), no internal handler, and ed_service proxy failed")
-            return {"error": f"Tool not found: {tool_name}"}
 
-        try:
-            if tool.handler_type == "http":
-                config = tool.handler_config or {}
-                url = config.get("url")
-                method = config.get("method", "POST")
+        # 3. Check if tool exists in unified registry (may have http/webhook config)
+        tool_def = self._registry.get(tool_name)
+        if tool_def and tool_def.handler:
+            # Try ed_service proxy as generic fallback for registry tools
+            try:
+                ed_result = await self._proxy_to_ed_service(tool_name, tool_input or {}, session=session)
+                if ed_result is not None:
+                    return ed_result
+            except Exception:
+                pass
 
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.request(
-                        method=method,
-                        url=url,
-                        json=tool_input,
-                    )
-                    if response.status_code == 200:
-                        return response.json()
-                    return {"error": f"HTTP {response.status_code}"}
-
-            elif tool.handler_type == "webhook":
-                config = tool.handler_config or {}
-                url = config.get("url") or config.get("webhook_url")
-                if not url:
-                    return {"error": "Webhook tool has no URL configured"}
-                method = config.get("method", "POST").upper()
-                headers = dict(config.get("headers") or {})
-                if config.get("auth_header") and config.get("auth_value"):
-                    headers[config["auth_header"]] = config["auth_value"]
-                if config.get("webhook_secret"):
-                    headers["x-webhook-secret"] = config["webhook_secret"]
-                headers.setdefault("Content-Type", "application/json")
-
-                async with httpx.AsyncClient(timeout=45.0) as client:
-                    response = await client.request(
-                        method=method, url=url, json=tool_input, headers=headers,
-                    )
-                    try:
-                        data = response.json()
-                    except Exception:
-                        data = {"raw": response.text[:2000]}
-                    if response.status_code < 400:
-                        return {"success": True, "data": data}
-                    return {"error": f"Webhook returned {response.status_code}", "data": data}
-
-            elif tool.handler_type == "internal":
-                handler = self.tool_handlers.get(tool_name)
-                if handler:
-                    return await handler(tool_input, session=session)
-                return {"error": f"No handler for tool: {tool_name}"}
-
-            else:
-                return {"error": f"Unknown handler type: {tool.handler_type}"}
-
-        except Exception as e:
-            return {"error": str(e)}
+        # 4. Tool not found anywhere
+        logger.warning(f"Tool '{tool_name}' — no handler in map, not in ED_SERVICE_TOOLS, not proxied")
+        return {"error": f"Tool '{tool_name}' not found. Available: {', '.join(sorted(self._handler_map.keys())[:20])}..."}
 
     # ------------------------------------------------------------------
     # Phase 1.3: ed_service tool proxy
@@ -2559,73 +2500,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
             logger.warning(f"ed_service proxy error for '{tool_name}': {e}")
             return {"error": str(e)}
 
-    async def _load_tools(
-        self,
-        tool_names: List[str],
-        db_session: AsyncSession,
-        tool_mode: str = "smart",
-    ) -> List[ToolSpec]:
-        """Load tool definitions from unified registry + any custom DB tools.
-        
-        tool_mode='smart': Load ALL tools from unified registry.
-        tool_mode='manual': Load only the tools specified in tool_names.
-        """
-        from .rg_tool_registry.builtin_tools import build_registry
-
-        registry = build_registry()
-
-        # === Convert unified ToolDef → ToolSpec ===
-        def _to_spec(td) -> ToolSpec:
-            return ToolSpec(
-                name=td.name,
-                description=td.description,
-                parameters_schema=td.to_openai()["function"]["parameters"],
-                handler_type="internal",
-                category=td.category.value if td.category else "general",
-            )
-
-        if tool_mode == "smart":
-            specs = [_to_spec(td) for td in registry.get_all()]
-        else:
-            requested = set(n for n in (tool_names or []) if n and isinstance(n, str))
-            if not requested:
-                requested = {"web_search", "fetch_url"}
-            specs = [_to_spec(td) for td in registry.get_all() if td.name in requested]
-            # If manual mode got nothing, fall back to all
-            if not specs:
-                specs = [_to_spec(td) for td in registry.get_all()]
-
-        # === Merge any custom DB tools (user-created HTTP/webhook tools) ===
-        try:
-            result = await db_session.execute(
-                select(ToolDefinition)
-                .where(ToolDefinition.is_active == True)
-                .where(ToolDefinition.handler_type.in_(["http", "webhook"]))
-            )
-            custom_tools = result.scalars().all()
-            registry_names = {s.name for s in specs}
-            for ct in custom_tools:
-                if ct.name not in registry_names:
-                    specs.append(ToolSpec(
-                        name=ct.name,
-                        description=ct.description or "",
-                        parameters_schema=ct.parameters_schema,
-                        handler_type=ct.handler_type or "http",
-                        handler_config=ct.handler_config,
-                        category=ct.category or "custom",
-                        id=str(ct.id),
-                    ))
-        except Exception as e:
-            logger.warning(f"[_load_tools] Custom DB tools merge failed: {e}")
-
-        return specs
-
-    def _format_tools(self, tools: List[ToolSpec]) -> str:
-        """Format tools for prompt (compact — name + description only)."""
-        if not tools:
-            return "No tools available."
-        return "\n".join(f"- {t.name}: {t.description}" for t in tools)
-
     def _format_history(self, history: List[Dict[str, Any]]) -> str:
         """Format history in a structured way the LLM can learn from."""
         if not history:
@@ -2664,8 +2538,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
         return "\n".join(lines)
 
     def register_tool_handler(self, name: str, handler: callable):
-        """Register an internal tool handler."""
-        self.tool_handlers[name] = handler
+        """Register a tool handler into the unified handler map."""
+        self._handler_map[name] = handler
 
     def _estimate_action_cost(self, action: Dict[str, Any]) -> float:
         """

@@ -278,14 +278,15 @@ class ToolRegistry:
         categories: Optional[List[ToolCategory]] = None,
         names: Optional[List[str]] = None,
     ) -> List[ToolDef]:
-        """Get tools filtered by access level, categories, or explicit names."""
+        """Get tools filtered by categories or explicit names.
+        
+        NOTE: access filtering is DISABLED — ALL tools are available
+        to ALL systems (agents, chat, IDE, guest). The platform provides
+        full tool access; security is enforced at the sandbox layer.
+        """
         tools = list(self._tools.values())
 
-        if access:
-            tools = [
-                t for t in tools
-                if access in t.access or ToolAccess.ALL in t.access
-            ]
+        # access parameter intentionally ignored — all tools available everywhere
 
         if categories:
             cat_set = set(categories)
