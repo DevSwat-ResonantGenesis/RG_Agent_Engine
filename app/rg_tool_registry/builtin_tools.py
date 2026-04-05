@@ -439,16 +439,27 @@ GITHUB_TOOLS = [
 
 # ── TOOL MANAGEMENT ──
 TOOL_MANAGEMENT_TOOLS = [
-    ToolDef(name="create_tool", description="Create custom HTTP tool stored in DB.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING, required=True), ToolParam("endpoint_url", ParamType.STRING, required=True)],
-            handler="_custom_create_tool", access={_R}, priority=40),
-    ToolDef(name="list_tools", description="List user's custom tools.", category=ToolCategory.SYSTEM,
-            params=[], handler="_custom_list_tools", access={_R}, priority=40),
+    ToolDef(name="create_tool", description="Create custom HTTP tool stored in DB. Tool becomes available platform-wide when is_shared=true.", category=ToolCategory.SYSTEM,
+            params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING, required=True), ToolParam("endpoint_url", ParamType.STRING, required=True),
+                    ToolParam("category", ParamType.STRING, "tool category (auto-created if new)", default="custom"),
+                    ToolParam("http_method", ParamType.STRING, default="GET"), ToolParam("parameters", ParamType.OBJECT, "JSON param schema"),
+                    ToolParam("request_body", ParamType.OBJECT, "JSON body template"), ToolParam("is_shared", ParamType.BOOLEAN, "make available platform-wide", default=False)],
+            handler="_custom_create_tool", access={_R, _G, _A}, priority=40),
+    ToolDef(name="list_tools", description="List user's custom tools and all shared platform tools.", category=ToolCategory.SYSTEM,
+            params=[], handler="_custom_list_tools", access={_R, _G, _A}, priority=40),
     ToolDef(name="delete_tool", description="Delete a custom tool.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("tool_name", ParamType.STRING, required=True)], handler="_custom_delete_tool", access={_R}, priority=40),
+            params=[ToolParam("tool_name", ParamType.STRING, required=True)], handler="_custom_delete_tool", access={_R, _G, _A}, priority=40),
     ToolDef(name="update_tool", description="Update an existing custom tool.", category=ToolCategory.SYSTEM,
             params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING), ToolParam("endpoint_url", ParamType.STRING), ToolParam("http_method", ParamType.STRING)],
-            handler="_custom_update_tool", access={_R}, priority=40),
+            handler="_custom_update_tool", access={_R, _G, _A}, priority=40),
+    ToolDef(name="auto_build_tool", description="LLM designs, validates (AST safety scan), and registers a new tool at runtime. Describe what the tool should do and it will be created automatically.", category=ToolCategory.SYSTEM,
+            params=[ToolParam("capability", ParamType.STRING, "what the tool should do", required=True),
+                    ToolParam("category", ParamType.STRING, "tool category", default="custom"),
+                    ToolParam("is_shared", ParamType.BOOLEAN, "make available platform-wide", default=True)],
+            handler="_custom_auto_build_tool", access={_R, _G, _A}, priority=35),
+    ToolDef(name="check_tool_exists", description="Check if a capability exists as a tool. Returns the tool if found, or suggests building one if not.", category=ToolCategory.SYSTEM,
+            params=[ToolParam("capability", ParamType.STRING, "what you need the tool to do", required=True)],
+            handler="_custom_check_tool_exists", access={_R, _G, _A}, priority=35),
 ]
 
 # ── GIT OPERATIONS ──

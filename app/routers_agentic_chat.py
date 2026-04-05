@@ -354,6 +354,7 @@ async def _ensure_tables():
                     request_body_template JSONB DEFAULT NULL,
                     headers_template JSONB DEFAULT '{}'::jsonb,
                     is_active BOOLEAN DEFAULT TRUE,
+                    is_shared BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(user_id, tool_name)
@@ -362,6 +363,16 @@ async def _ensure_tables():
             await conn.execute(sa_text("""
                 CREATE INDEX IF NOT EXISTS idx_act_user_id ON agentic_custom_tools(user_id)
             """))
+            await conn.execute(sa_text("""
+                CREATE INDEX IF NOT EXISTS idx_act_shared ON agentic_custom_tools(is_shared) WHERE is_shared = TRUE
+            """))
+            # Migration: add is_shared column if missing
+            try:
+                await conn.execute(sa_text(
+                    "ALTER TABLE agentic_custom_tools ADD COLUMN IF NOT EXISTS is_shared BOOLEAN DEFAULT FALSE"
+                ))
+            except Exception:
+                pass
         _DDL_DONE = True
         print("[AGENTIC_CHAT] DB tables ready", flush=True)
     except Exception as e:
@@ -1601,7 +1612,8 @@ GATEWAY_URL = os.getenv("GATEWAY_URL", "http://gateway:8000")
 
 
 async def _load_user_custom_tools(user_id: str) -> Dict[str, Any]:
-    """Load custom tools from DB for a user (with cache)."""
+    """Load custom tools from DB for a user (with cache).
+    Includes the user's own tools AND all platform-wide shared tools."""
     import time
     now = time.time()
     cached_ts = _custom_tools_cache_ts.get(user_id, 0)
@@ -1614,7 +1626,7 @@ async def _load_user_custom_tools(user_id: str) -> Dict[str, Any]:
             rows = await conn.execute(sa_text(
                 "SELECT tool_name, description, category, parameters, http_method, "
                 "endpoint_url, request_body_template, headers_template "
-                "FROM agentic_custom_tools WHERE user_id = :uid AND is_active = TRUE"
+                "FROM agentic_custom_tools WHERE (user_id = :uid OR is_shared = TRUE) AND is_active = TRUE"
             ), {"uid": user_id})
             for row in rows:
                 tname = row[0]
@@ -1682,13 +1694,14 @@ async def _custom_create_tool(args: dict, ctx: dict) -> dict:
             request_body = None
 
     category = (args.get("category") or "custom").strip()
+    is_shared = bool(args.get("is_shared", False))
 
     try:
         async with _db_engine.begin() as conn:
             await conn.execute(sa_text("""
                 INSERT INTO agentic_custom_tools (user_id, tool_name, description, category,
-                    parameters, http_method, endpoint_url, request_body_template)
-                VALUES (:uid, :name, :desc, :cat, CAST(:params AS jsonb), :method, :url, CAST(:body AS jsonb))
+                    parameters, http_method, endpoint_url, request_body_template, is_shared)
+                VALUES (:uid, :name, :desc, :cat, CAST(:params AS jsonb), :method, :url, CAST(:body AS jsonb), :shared)
                 ON CONFLICT (user_id, tool_name) DO UPDATE SET
                     description = EXCLUDED.description,
                     category = EXCLUDED.category,
@@ -1696,6 +1709,7 @@ async def _custom_create_tool(args: dict, ctx: dict) -> dict:
                     http_method = EXCLUDED.http_method,
                     endpoint_url = EXCLUDED.endpoint_url,
                     request_body_template = EXCLUDED.request_body_template,
+                    is_shared = EXCLUDED.is_shared,
                     is_active = TRUE,
                     updated_at = NOW()
             """), {
@@ -1704,11 +1718,16 @@ async def _custom_create_tool(args: dict, ctx: dict) -> dict:
                 "params": json.dumps(parameters) if not isinstance(parameters, str) else parameters,
                 "method": http_method, "url": endpoint_url,
                 "body": json.dumps(request_body) if request_body else None,
+                "shared": is_shared,
             })
         _invalidate_custom_tools_cache(user_id)
+        # Invalidate all caches if shared (so other users pick it up)
+        if is_shared:
+            _custom_tools_cache.clear()
+            _custom_tools_cache_ts.clear()
         return {
             "success": True,
-            "message": f"Tool '{tool_name}' created successfully! I can now use it in this and future conversations.",
+            "message": f"Tool '{tool_name}' created successfully!" + (" Available platform-wide." if is_shared else " Available in your sessions."),
             "tool": {
                 "name": tool_name,
                 "description": description,
@@ -1717,6 +1736,7 @@ async def _custom_create_tool(args: dict, ctx: dict) -> dict:
                 "http_method": http_method,
                 "endpoint_url": endpoint_url,
                 "request_body": request_body,
+                "is_shared": is_shared,
             }
         }
     except Exception as e:
@@ -1724,7 +1744,7 @@ async def _custom_create_tool(args: dict, ctx: dict) -> dict:
 
 
 async def _custom_list_tools(args: dict, ctx: dict) -> dict:
-    """List all custom tools for the user."""
+    """List all custom tools for the user + all shared platform tools."""
     user_id = ctx.get("user_id", "")
     if not user_id:
         return {"error": "Authentication required"}
@@ -1734,8 +1754,9 @@ async def _custom_list_tools(args: dict, ctx: dict) -> dict:
         async with _db_engine.begin() as conn:
             rows = await conn.execute(sa_text(
                 "SELECT tool_name, description, category, parameters, http_method, "
-                "endpoint_url, request_body_template, created_at, is_active "
-                "FROM agentic_custom_tools WHERE user_id = :uid ORDER BY created_at DESC"
+                "endpoint_url, request_body_template, created_at, is_active, is_shared, user_id "
+                "FROM agentic_custom_tools WHERE (user_id = :uid OR is_shared = TRUE) AND is_active = TRUE "
+                "ORDER BY is_shared DESC, created_at DESC"
             ), {"uid": user_id})
             for row in rows:
                 tools.append({
@@ -1748,6 +1769,8 @@ async def _custom_list_tools(args: dict, ctx: dict) -> dict:
                     "request_body": row[6],
                     "created_at": str(row[7]) if row[7] else None,
                     "is_active": row[8],
+                    "is_shared": row[9],
+                    "owned_by_you": row[10] == user_id,
                 })
         return {"tools": tools, "count": len(tools)}
     except Exception as e:
@@ -1904,6 +1927,188 @@ def _substitute_params(obj: Any, params: dict):
                 obj[i] = item
             elif isinstance(item, (dict, list)):
                 _substitute_params(item, params)
+
+
+# ── Autonomous Tool Builder ──
+
+async def _custom_auto_build_tool(args: dict, ctx: dict) -> dict:
+    """LLM designs, validates, and registers a new tool at runtime.
+
+    Flow:
+    1. Agent describes what the tool should do (capability)
+    2. LLM designs the tool spec (name, description, endpoint, method, params)
+    3. AST safety scan on the generated spec
+    4. Tool is registered in DB via create_tool
+    5. Tool becomes available immediately (platform-wide if is_shared=True)
+    """
+    user_id = ctx.get("user_id", "")
+    if not user_id:
+        return {"error": "Authentication required to build tools"}
+
+    capability = (args.get("capability") or "").strip()
+    if not capability:
+        return {"error": "capability is required — describe what the tool should do"}
+
+    category = (args.get("category") or "custom").strip()
+    is_shared = bool(args.get("is_shared", True))
+
+    # Step 1: Use LLM to design the tool specification
+    design_prompt = f"""Design a platform tool based on this capability request:
+"{capability}"
+
+You must output ONLY valid JSON with these fields:
+{{
+  "tool_name": "snake_case_name (unique, descriptive)",
+  "description": "clear description of what the tool does",
+  "endpoint_url": "the API endpoint URL this tool calls (use {{{{param}}}} for path params)",
+  "http_method": "GET or POST or PUT or DELETE",
+  "parameters": {{"param_name": "param description", ...}},
+  "request_body": null or {{"field": "{{{{param_name}}}}"}},
+  "category": "{category}"
+}}
+
+Rules:
+- tool_name must be snake_case, 3-50 chars, no spaces
+- endpoint_url can be relative (prefixed with gateway) or absolute
+- For platform API tools, use relative paths like /api/v1/service/endpoint
+- For external API tools, use full URLs
+- parameters should describe what each param does
+- Output ONLY the JSON object, nothing else"""
+
+    import os as _os
+    groq_key = _os.getenv("GROQ_API_KEY", "")
+    openai_key = _os.getenv("OPENAI_API_KEY", "")
+
+    design_result = None
+    last_err = ""
+
+    # Try Groq first, then OpenAI
+    for provider_url, provider_key, model in [
+        ("https://api.groq.com/openai/v1/chat/completions", groq_key, "llama-3.3-70b-versatile"),
+        ("https://api.openai.com/v1/chat/completions", openai_key, "gpt-4o-mini"),
+    ]:
+        if not provider_key:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(provider_url, json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": design_prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 500,
+                }, headers={"Authorization": f"Bearer {provider_key}"})
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"].strip()
+                    # Extract JSON from response
+                    if "```" in content:
+                        content = content.split("```")[1]
+                        if content.startswith("json"):
+                            content = content[4:]
+                        content = content.strip()
+                    design_result = json.loads(content)
+                    break
+                else:
+                    last_err = f"{model}: HTTP {resp.status_code}"
+        except Exception as e:
+            last_err = f"{model}: {str(e)[:200]}"
+
+    if not design_result:
+        return {"error": f"Failed to design tool: {last_err}"}
+
+    # Step 2: AST safety scan — validate the spec
+    tool_name = (design_result.get("tool_name") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not tool_name or len(tool_name) < 3:
+        return {"error": f"LLM generated invalid tool_name: {tool_name!r}"}
+
+    # Forbidden patterns in endpoint URLs
+    _FORBIDDEN_URL_PATTERNS = ["127.0.0.1", "localhost", "0.0.0.0", "metadata.google", "169.254.169.254",
+                                "file://", "ftp://", "../", "..\\"]
+    endpoint_url = (design_result.get("endpoint_url") or "").strip()
+    for pattern in _FORBIDDEN_URL_PATTERNS:
+        if pattern in endpoint_url.lower():
+            return {"error": f"Safety scan failed: endpoint_url contains forbidden pattern '{pattern}'"}
+
+    # Step 3: Register via create_tool
+    create_args = {
+        "tool_name": tool_name,
+        "description": design_result.get("description", capability),
+        "endpoint_url": endpoint_url,
+        "http_method": design_result.get("http_method", "GET"),
+        "parameters": design_result.get("parameters", {}),
+        "request_body": design_result.get("request_body"),
+        "category": design_result.get("category", category),
+        "is_shared": is_shared,
+    }
+    result = await _custom_create_tool(create_args, ctx)
+
+    if result.get("success"):
+        result["auto_built"] = True
+        result["design"] = design_result
+        result["message"] = (
+            f"Tool '{tool_name}' auto-built and registered! "
+            f"Category: {create_args['category']}. "
+            + ("Available platform-wide." if is_shared else "Available in your sessions.")
+            + f" You can now use it by calling '{tool_name}'."
+        )
+    return result
+
+
+async def _custom_check_tool_exists(args: dict, ctx: dict) -> dict:
+    """Check if a capability exists as an existing tool.
+    Searches both built-in tools and custom/shared tools.
+    If not found, suggests using auto_build_tool to create one."""
+    capability = (args.get("capability") or "").strip().lower()
+    if not capability:
+        return {"error": "capability is required"}
+
+    # Search built-in tools
+    matches = []
+    for tname, tdef in TOOL_DEFS.items():
+        desc = (tdef.description or "").lower()
+        name_lower = tname.lower()
+        if any(word in name_lower or word in desc for word in capability.split()):
+            matches.append({
+                "name": tname,
+                "description": tdef.description,
+                "category": tdef.category.value if hasattr(tdef.category, 'value') else str(tdef.category),
+                "source": "built-in",
+            })
+
+    # Search custom/shared tools
+    user_id = ctx.get("user_id", "")
+    if user_id:
+        try:
+            custom = await _load_user_custom_tools(user_id)
+            for tname, tdef in custom.items():
+                desc = (tdef.get("desc") or "").lower()
+                if any(word in tname.lower() or word in desc for word in capability.split()):
+                    matches.append({
+                        "name": tname,
+                        "description": tdef.get("desc", ""),
+                        "category": tdef.get("category", "custom"),
+                        "source": "custom",
+                    })
+        except Exception:
+            pass
+
+    if matches:
+        return {
+            "found": True,
+            "matches": matches[:10],
+            "count": len(matches),
+            "message": f"Found {len(matches)} matching tool(s) for '{capability}'.",
+        }
+    else:
+        return {
+            "found": False,
+            "matches": [],
+            "count": 0,
+            "message": (
+                f"No existing tool matches '{capability}'. "
+                "You can create one using auto_build_tool with a description of what the tool should do."
+            ),
+            "suggestion": "auto_build_tool",
+        }
 
 
 # ── Web Search Handler (Tavily) ──
@@ -3745,6 +3950,8 @@ CUSTOM_HANDLERS = {
     "_custom_list_tools": _custom_list_tools,
     "_custom_delete_tool": _custom_delete_tool,
     "_custom_update_tool": _custom_update_tool,
+    "_custom_auto_build_tool": _custom_auto_build_tool,
+    "_custom_check_tool_exists": _custom_check_tool_exists,
     # System tools
     "_custom_get_current_time": _custom_get_current_time,
     "_custom_get_system_info": _custom_get_system_info,

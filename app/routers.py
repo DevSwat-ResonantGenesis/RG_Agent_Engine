@@ -1972,7 +1972,7 @@ async def execute_tool_direct(request: Request):
     """Execute a platform tool directly (no agent session required).
 
     Used by OpenClaw service, external integrations, and inter-service calls.
-    Body: {tool_name: str, tool_input: dict}
+    Body: {tool_name: str, tool_input: dict, user_id?: str}
     """
     from .executor import AgentExecutor
 
@@ -1983,13 +1983,36 @@ async def execute_tool_direct(request: Request):
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing tool_name")
 
+    # Extract user context from headers or body (for tool management)
+    user_id = (
+        request.headers.get("x-user-id")
+        or body.get("user_id")
+        or "anonymous"
+    )
+
     executor = AgentExecutor()
+
+    # Build a lightweight session-like object for tools that need user context
+    _TOOL_MGMT = {"create_tool", "list_tools", "delete_tool", "update_tool",
+                   "auto_build_tool", "check_tool_exists"}
 
     # Handler map
     handler = executor._handler_map.get(tool_name)
     if handler:
         try:
-            result = await handler(tool_input, session=None)
+            if tool_name in _TOOL_MGMT:
+                # Tool management needs user context — build a mock session
+                class _Ctx:
+                    pass
+                mock = _Ctx()
+                mock.user_id = user_id
+                mock.context = {
+                    "org_id": request.headers.get("x-org-id", ""),
+                    "user_role": request.headers.get("x-user-role", "user"),
+                }
+                result = await handler(tool_input, session=mock)
+            else:
+                result = await handler(tool_input, session=None)
             return {"success": True, "tool_name": tool_name, "result": result}
         except Exception as e:
             return {"success": False, "tool_name": tool_name, "error": str(e)}
@@ -2002,6 +2025,16 @@ async def execute_tool_direct(request: Request):
                 return {"success": True, "tool_name": tool_name, "result": result}
         except Exception as e:
             return {"success": False, "tool_name": tool_name, "error": str(e)}
+
+    # Try dynamic custom tools (user-created or shared)
+    try:
+        from .routers_agentic_chat import _execute_dynamic_custom_tool
+        ctx = {"user_id": user_id}
+        result = await _execute_dynamic_custom_tool(tool_name, tool_input or {}, ctx)
+        if not result.get("error", "").startswith("Custom tool"):
+            return {"success": True, "tool_name": tool_name, "result": result}
+    except Exception:
+        pass
 
     raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 

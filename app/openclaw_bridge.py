@@ -513,23 +513,48 @@ class OpenClawBridge:
         return result
 
     async def list_platform_tools(self) -> Dict[str, Any]:
-        """Return all platform tools available for OpenClaw agents (REST endpoint helper)."""
+        """Return all platform tools available for OpenClaw agents (REST endpoint helper).
+        Includes built-in tools + all shared custom tools from the DB."""
         try:
             from .rg_tool_registry.builtin_tools import build_registry
             registry = build_registry()
             tools = []
+            seen_names = set()
             for td in registry.get_all():
                 tools.append({
                     "name": td.name,
                     "description": td.description,
                     "category": td.category.value if td.category else "general",
+                    "source": "built-in",
                 })
+                seen_names.add(td.name)
             # Add platform API meta-tools
-            tools.extend([
+            for meta in [
                 {"name": "platform_api", "description": "Call any platform service API by name+endpoint", "category": "platform_api"},
                 {"name": "discover_services", "description": "Browse platform services by category", "category": "platform_api"},
                 {"name": "discover_api", "description": "List endpoints for a specific platform service", "category": "platform_api"},
-            ])
+            ]:
+                if meta["name"] not in seen_names:
+                    meta["source"] = "built-in"
+                    tools.append(meta)
+                    seen_names.add(meta["name"])
+
+            # Add shared custom tools from DB
+            try:
+                from .routers_agentic_chat import _load_user_custom_tools
+                shared_tools = await _load_user_custom_tools("__platform__")
+                for tname, tdef in shared_tools.items():
+                    if tname not in seen_names:
+                        tools.append({
+                            "name": tname,
+                            "description": tdef.get("desc", ""),
+                            "category": tdef.get("category", "custom"),
+                            "source": "custom-shared",
+                        })
+                        seen_names.add(tname)
+            except Exception as e:
+                logger.debug(f"[OpenClaw] Failed to load shared custom tools: {e}")
+
             return {"tools": tools, "total": len(tools)}
         except Exception as e:
             return {"tools": [], "total": 0, "error": str(e)}

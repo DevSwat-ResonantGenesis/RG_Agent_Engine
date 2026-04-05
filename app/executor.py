@@ -216,6 +216,13 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "platform_api": self._tool_platform_api,
             "discover_services": self._tool_discover_services,
             "discover_api": self._tool_discover_api,
+            # === DYNAMIC TOOL MANAGEMENT (OpenClaw + Agent Engine + Chat) ===
+            "create_tool": self._tool_create_tool,
+            "list_tools": self._tool_list_tools,
+            "delete_tool": self._tool_delete_tool,
+            "update_tool": self._tool_update_tool,
+            "auto_build_tool": self._tool_auto_build_tool,
+            "check_tool_exists": self._tool_check_tool_exists,
         }
 
         # Tool-level sandbox boundary: rate limiting, arg validation, resource access control
@@ -2681,6 +2688,52 @@ Answer questions directly. Only perform actions when explicitly asked."""
             if feedback:
                 lines.append(f"  FEEDBACK: {feedback}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Dynamic Tool Management — delegates to routers_agentic_chat handlers
+    # These let OpenClaw agents + Agent Engine sessions create/manage tools
+    # ------------------------------------------------------------------
+
+    async def _tool_create_tool(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_create_tool
+        ctx = self._build_tool_ctx(session)
+        return await _custom_create_tool(tool_input, ctx)
+
+    async def _tool_list_tools(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_list_tools
+        ctx = self._build_tool_ctx(session)
+        return await _custom_list_tools(tool_input, ctx)
+
+    async def _tool_delete_tool(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_delete_tool
+        ctx = self._build_tool_ctx(session)
+        return await _custom_delete_tool(tool_input, ctx)
+
+    async def _tool_update_tool(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_update_tool
+        ctx = self._build_tool_ctx(session)
+        return await _custom_update_tool(tool_input, ctx)
+
+    async def _tool_auto_build_tool(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_auto_build_tool
+        ctx = self._build_tool_ctx(session)
+        return await _custom_auto_build_tool(tool_input, ctx)
+
+    async def _tool_check_tool_exists(self, tool_input: dict, session=None):
+        from .routers_agentic_chat import _custom_check_tool_exists
+        ctx = self._build_tool_ctx(session)
+        return await _custom_check_tool_exists(tool_input, ctx)
+
+    def _build_tool_ctx(self, session) -> dict:
+        """Build a context dict from session for tool management handlers."""
+        if session:
+            return {
+                "user_id": str(session.user_id) if hasattr(session, 'user_id') else
+                           (session.get("user_id") if isinstance(session, dict) else "agent-system"),
+                "org_id": (session.context.get("org_id", "") if hasattr(session, 'context') else ""),
+                "user_role": (session.context.get("user_role", "user") if hasattr(session, 'context') else "user"),
+            }
+        return {"user_id": "agent-system", "org_id": "", "user_role": "system"}
 
     def register_tool_handler(self, name: str, handler: callable):
         """Register a tool handler into the unified handler map."""
