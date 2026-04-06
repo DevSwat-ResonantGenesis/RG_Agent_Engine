@@ -1,5 +1,0 @@
-"""
-Executor Module
-"""
-
-# Placeholder implementation
