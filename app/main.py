@@ -88,6 +88,21 @@ app.include_router(approval_router)
 app.include_router(dsidp_router)
 app.include_router(goals_router, prefix="/agents")
 
+# Startup hook: mark orphaned "running" sessions as failed (they died with the previous process)
+@app.on_event("startup")
+async def cleanup_orphaned_sessions():
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text("UPDATE agent_sessions SET status = 'failed' WHERE status = 'running'")
+            )
+            count = result.rowcount
+            if count:
+                logger.warning(f"[STARTUP] Marked {count} orphaned 'running' sessions as 'failed'")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Orphan cleanup skipped: {e}")
+
+
 # Startup hook to ensure safety_rules.parameters column exists
 @app.on_event("startup")
 async def ensure_schema():
