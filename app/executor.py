@@ -1914,6 +1914,31 @@ Answer questions directly. Only perform actions when explicitly asked."""
         # Load safety rules
         await safety_envelope.load_rules(db_session, str(agent.id))
 
+        # ── INTELLIGENCE LAYER: Memory recall + learning injection ──
+        # Load relevant memories and past learnings BEFORE planning so the
+        # agent starts each session with accumulated knowledge.
+        _recalled_context = {}
+        try:
+            _recalled_context = await self._recall_agent_memory(
+                agent_id=str(agent.id),
+                user_id=user_id,
+                goal=session.current_goal,
+            )
+            if _recalled_context:
+                # Merge recalled context into session so planner + LLM can use it
+                ctx = session.context or {}
+                ctx["recalled_memories"] = _recalled_context.get("memories", [])
+                ctx["learned_patterns"] = _recalled_context.get("patterns", [])
+                ctx["past_successes"] = _recalled_context.get("past_successes", [])
+                session.context = ctx
+                logger.info(
+                    f"[INTELLIGENCE] Session {session.id}: recalled "
+                    f"{len(ctx.get('recalled_memories', []))} memories, "
+                    f"{len(ctx.get('learned_patterns', []))} patterns"
+                )
+        except Exception as e:
+            logger.warning(f"[INTELLIGENCE] Memory recall failed (non-fatal): {e}")
+
         # Mark session as running early to avoid long "initializing" states
         session.status = "running"
         await db_session.commit()
@@ -2540,6 +2565,21 @@ Answer questions directly. Only perform actions when explicitly asked."""
         except Exception:
             pass
 
+        # ── INTELLIGENCE: Inject recalled memories + past successes ──
+        try:
+            recalled_memories = (context or {}).get("recalled_memories", [])
+            past_successes = (context or {}).get("past_successes", [])
+            if recalled_memories:
+                mem_lines = [m[:300] for m in recalled_memories[:3]]
+                prompt += "\n\nRelevant memories from past interactions:\n- " + "\n- ".join(mem_lines)
+            if past_successes:
+                success_lines = []
+                for ps in past_successes[:3]:
+                    success_lines.append(f"Goal: {ps.get('goal', '')[:100]} → completed in {ps.get('steps', '?')} steps")
+                prompt += "\n\nPast successful tasks:\n- " + "\n- ".join(success_lines)
+        except Exception:
+            pass
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
@@ -2792,6 +2832,152 @@ Answer questions directly. Only perform actions when explicitly asked."""
         """Register a tool handler into the unified handler map."""
         self._handler_map[name] = handler
 
+    # ── INTELLIGENCE LAYER: Memory recall + learning persistence ──────
+
+    async def _recall_agent_memory(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+    ) -> Dict[str, Any]:
+        """Recall relevant memories and learned patterns before a session starts.
+
+        This is the key intelligence bridge — agents don't start from zero.
+        They load:
+        1. Relevant memories from Hash Sphere (past interactions, facts)
+        2. Learned patterns from the learning loop (successful sequences, errors to avoid)
+        3. Past successes for similar goals
+        """
+        result: Dict[str, Any] = {"memories": [], "patterns": [], "past_successes": []}
+
+        # 1. Recall from Hash Sphere / Memory Service
+        try:
+            url = f"{settings.MEMORY_SERVICE_URL.rstrip('/')}/memory/retrieve"
+            payload = {
+                "query": goal[:500],
+                "user_id": user_id or agent_id,
+                "agent_id": agent_id,
+                "top_k": 5,
+                "min_relevance": 0.3,
+            }
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    memories = data.get("results") or data.get("memories") or []
+                    for mem in memories[:5]:
+                        content = mem.get("content") or mem.get("text") or str(mem)
+                        if isinstance(content, str) and len(content) > 10:
+                            result["memories"].append(content[:500])
+                    if result["memories"]:
+                        logger.info(f"[INTELLIGENCE] Recalled {len(result['memories'])} memories for agent {agent_id}")
+        except Exception as e:
+            logger.debug(f"[INTELLIGENCE] Memory recall skipped: {e}")
+
+        # 2. Load learned patterns from learning loop
+        try:
+            ll = get_learning_loop()
+            recs = ll.get_recommendations(goal, list(self._handler_map.keys()))
+            if recs.get("confidence", 0) > 0.2:
+                for seq in recs.get("suggested_sequences", [])[:3]:
+                    result["patterns"].append({
+                        "type": "proven_sequence",
+                        "sequence": seq.get("sequence", []),
+                        "success_rate": seq.get("success_rate", 0),
+                    })
+                for avoid in recs.get("patterns_to_avoid", [])[:3]:
+                    result["patterns"].append({
+                        "type": "avoid",
+                        "error": avoid.get("error", "")[:200],
+                        "occurrences": avoid.get("occurrences", 0),
+                    })
+        except Exception as e:
+            logger.debug(f"[INTELLIGENCE] Learning recall skipped: {e}")
+
+        # 3. Load past successes for similar goals from DB
+        try:
+            from sqlalchemy import select
+            from .db import async_session
+            async with async_session() as db:
+                from .models import AgentSession
+                stmt = (
+                    select(AgentSession)
+                    .where(
+                        AgentSession.agent_id == agent_id,
+                        AgentSession.status == "completed",
+                    )
+                    .order_by(AgentSession.completed_at.desc())
+                    .limit(5)
+                )
+                rows = await db.execute(stmt)
+                sessions = rows.scalars().all()
+                for s in sessions:
+                    past_goal = s.current_goal or ""
+                    if past_goal and len(past_goal) > 5:
+                        result["past_successes"].append({
+                            "goal": past_goal[:200],
+                            "steps": s.loop_count or 0,
+                            "output_preview": (s.final_output or "")[:200],
+                        })
+        except Exception as e:
+            logger.debug(f"[INTELLIGENCE] Past successes recall skipped: {e}")
+
+        return result
+
+    async def _persist_learning_to_memory(
+        self,
+        agent_id: str,
+        user_id: str,
+        goal: str,
+        outcome: str,
+        patterns: List[Dict[str, Any]],
+    ):
+        """Persist learned patterns to Memory Service so they survive restarts.
+
+        Called after _record_session_learning to make the in-memory learning
+        loop patterns durable via Hash Sphere.
+        """
+        if not patterns:
+            return
+
+        # Build a compact learning summary
+        pattern_lines = []
+        for p in patterns[:5]:
+            ptype = p.get("type", "pattern")
+            if ptype == "proven_sequence":
+                seq = " → ".join(p.get("sequence", []))
+                pattern_lines.append(f"Proven: {seq} (success {p.get('success_rate', 0):.0%})")
+            elif ptype == "avoid":
+                pattern_lines.append(f"Avoid: {p.get('error', '')[:100]}")
+            else:
+                pattern_lines.append(f"{ptype}: {json.dumps(p)[:150]}")
+
+        content = (
+            f"Agent learning from goal: {goal[:200]}\n"
+            f"Outcome: {outcome}\n"
+            f"Patterns:\n" + "\n".join(f"- {l}" for l in pattern_lines)
+        )
+
+        try:
+            url = f"{settings.MEMORY_SERVICE_URL.rstrip('/')}/memory/ingest"
+            payload = {
+                "content": content,
+                "user_id": user_id or agent_id,
+                "agent_id": agent_id,
+                "metadata": {
+                    "type": "agent_learning",
+                    "goal": goal[:200],
+                    "outcome": outcome,
+                    "pattern_count": len(patterns),
+                },
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code in (200, 201):
+                    logger.info(f"[INTELLIGENCE] Persisted {len(patterns)} patterns for agent {agent_id}")
+        except Exception as e:
+            logger.debug(f"[INTELLIGENCE] Failed to persist learning: {e}")
+
     def _estimate_action_cost(self, action: Dict[str, Any]) -> float:
         """
         Estimate the cost of an action in RGT tokens.
@@ -2836,8 +3022,10 @@ Answer questions directly. Only perform actions when explicitly asked."""
         
         This enables PERSISTENT LEARNING - agents improve over time.
         Called at the end of every run_loop execution.
+        Records to in-memory learning loop AND persists to Memory Service.
         """
         import time
+        _patterns_to_persist: List[Dict[str, Any]] = []
         try:
             loop = get_learning_loop()
             duration = time.time() - start_time
@@ -2855,8 +3043,42 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 context=session.context or {},
             )
             logger.info(f"[LEARNING] Recorded session {session.id} outcome: {result.get('status')}")
+
+            # Extract patterns for persistence
+            recs = loop.get_recommendations(
+                session.current_goal or "",
+                list(self._handler_map.keys()),
+            )
+            if recs.get("confidence", 0) > 0.2:
+                for seq in recs.get("suggested_sequences", [])[:3]:
+                    _patterns_to_persist.append({
+                        "type": "proven_sequence",
+                        "sequence": seq.get("sequence", []),
+                        "success_rate": seq.get("success_rate", 0),
+                    })
+                for avoid in recs.get("patterns_to_avoid", [])[:3]:
+                    _patterns_to_persist.append({
+                        "type": "avoid",
+                        "error": avoid.get("error", "")[:200],
+                        "occurrences": avoid.get("occurrences", 0),
+                    })
         except Exception as e:
             logger.warning(f"[LEARNING] Failed to record: {e}")
+
+        # Persist to Memory Service (durable across restarts)
+        if _patterns_to_persist:
+            import asyncio
+            try:
+                user_id = str(session.user_id) if session.user_id else ""
+                asyncio.ensure_future(self._persist_learning_to_memory(
+                    agent_id=str(agent.id),
+                    user_id=user_id,
+                    goal=session.current_goal or "",
+                    outcome=result.get("status", "unknown"),
+                    patterns=_patterns_to_persist,
+                ))
+            except Exception as e:
+                logger.debug(f"[LEARNING] Persistence dispatch failed: {e}")
 
         # Phase 3.4: Record agent behavior for value drift detection
         try:

@@ -543,56 +543,48 @@ Begin solving this task step by step."""
         tool_input: Dict[str, Any],
         user_context: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
-        """Execute a tool."""
+        """Execute a tool through the REAL executor's handler_map.
+
+        Delegates to executor.py's AgentExecutorLoop which has 40+ real
+        tool handlers + ed_service proxy. No more fake placeholder strings.
+        """
         start = datetime.now(timezone.utc)
-        
-        tool = self.tool_registry.get(tool_name)
-        if not tool:
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                output=None,
-                error=f"Unknown tool: {tool_name}",
-            )
-        
+
         try:
-            # Execute based on tool category
-            if tool_name == "execute_code":
-                output = await self._execute_code(tool_input.get("code", ""))
-            elif tool_name == "read_file":
-                output = await self._read_file(tool_input.get("path", ""))
-            elif tool_name == "write_file":
-                output = await self._write_file(tool_input.get("path", ""), tool_input.get("content", ""))
-            elif tool_name == "web_search":
-                output = await self._web_search(tool_input.get("query", ""))
-            elif tool_name == "fetch_url":
-                output = await self._fetch_url(tool_input.get("url", ""))
-            elif tool_name == "send_message":
-                output = await self._send_message(agent_id, tool_input.get("to_agent", ""), tool_input.get("message", ""))
-            elif tool_name == "spawn_agent":
-                output = await self._spawn_agent(agent_id, tool_input.get("goal", ""))
-            elif tool_name == "memory.read":
-                output = await self._memory_read(tool_input, user_context or {})
-            elif tool_name == "memory.write":
-                output = await self._memory_write(tool_input, user_context or {})
-            else:
-                output = f"Tool {tool_name} executed with input: {tool_input}"
-            
+            from .executor import agent_executor as real_executor
+            result = await real_executor._execute_tool(
+                tool_name=tool_name,
+                tool_input=tool_input or {},
+                session=None,  # No session in this path — tools still work
+            )
+
             duration = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
-            
+
+            # real executor returns dict; check for errors
+            if isinstance(result, dict) and result.get("error"):
+                return ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    output=result,
+                    error=str(result["error"]),
+                    duration_ms=duration,
+                )
+
             return ToolResult(
                 tool_name=tool_name,
                 success=True,
-                output=output,
+                output=result,
                 duration_ms=duration,
             )
-            
+
         except Exception as e:
+            logger.warning(f"[AgentExecutor] Tool '{tool_name}' failed via real executor: {e}")
             return ToolResult(
                 tool_name=tool_name,
                 success=False,
                 output=None,
                 error=str(e),
+                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
             )
     
     async def _execute_code(self, code: str) -> str:
