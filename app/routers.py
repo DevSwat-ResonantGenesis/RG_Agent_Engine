@@ -2042,6 +2042,253 @@ async def list_platform_tools():
     ]
 
 
+# ════════════════════════════════════════════════════════════════════
+# FEDERATION — External agents running on user hardware
+# ════════════════════════════════════════════════════════════════════
+
+class FederationRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(default="Federated agent")
+    connection_url: Optional[str] = None  # URL where agent is reachable (optional)
+    hardware_info: Optional[Dict[str, Any]] = None  # CPU, RAM, GPU, OS
+    client_version: Optional[str] = None  # e.g. "openclaw-ext/1.2.0"
+    capabilities: Optional[List[str]] = None  # what the agent can do locally
+    tools: Optional[List[str]] = None  # platform tools to assign
+    provider: str = "groq"
+    model: str = "llama-3.3-70b-versatile"
+
+
+class FederationHeartbeatRequest(BaseModel):
+    agent_id: str
+    status: str = "online"  # online, busy, idle
+    metrics: Optional[Dict[str, Any]] = None  # cpu_pct, mem_mb, active_tasks, etc.
+
+
+@router.post("/federation/register")
+async def federation_register(
+    body: FederationRegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Register an external agent running on user hardware.
+
+    Creates a platform agent with agent_source='federated' and stores
+    federation metadata (connection_url, hardware_info, client_version).
+    The agent gets access to all platform tools via execute-tool-direct.
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+
+    federation_config = {
+        "connection_url": body.connection_url,
+        "hardware_info": body.hardware_info or {},
+        "client_version": body.client_version,
+        "capabilities": body.capabilities or [],
+        "registered_at": now.isoformat(),
+        "last_heartbeat": now.isoformat(),
+        "status": "online",
+    }
+
+    # Build system prompt
+    tools = body.tools or ["web_search", "fetch_url", "memory_read", "memory_write", "http_request"]
+    tools_csv = ", ".join(tools)
+    system_prompt = (
+        f"You are '{body.name}', a federated AI agent running on user hardware "
+        f"and connected to the Resonant Genesis platform.\n\n"
+        f"YOUR ROLE: {body.description}\n\n"
+        f"PLATFORM TOOLS: {tools_csv}\n"
+        f"You have full access to 200+ platform tools via the unified registry. "
+        f"Use discover_services and check_tool_exists to find additional tools.\n"
+    )
+
+    # Compute hashes
+    raw_hash = f"{user_id}:{body.name}:{now.isoformat()}"
+    agent_public_hash = hashlib.sha256(raw_hash.encode()).hexdigest()
+
+    safety_config = {
+        "mode": "governed",
+        "max_steps_per_run": 25,
+        "max_tokens_per_run": 50000,
+        "rate_limit_per_minute": 30,
+        "federated": True,
+    }
+
+    agent = AgentDefinition(
+        user_id=user_id,
+        name=body.name,
+        description=body.description,
+        system_prompt=system_prompt,
+        provider=body.provider,
+        model=body.model,
+        temperature=0.6,
+        max_tokens=4096,
+        tools=tools,
+        safety_config=safety_config,
+        allowed_actions=tools,
+        blocked_actions=["delete_community", "delete_user", "admin_override"],
+        agent_public_hash=agent_public_hash,
+        agent_version_hash=hashlib.sha256(system_prompt.encode()).hexdigest(),
+        agent_source="federated",
+        openclaw_config=federation_config,  # DB column reused for federation metadata
+        mode="governed",
+        is_active=True,
+    )
+
+    db.add(agent)
+    await db.commit()
+    await db.refresh(agent)
+
+    logger.info(f"[FEDERATION] Registered agent '{body.name}' ({agent.id}) from {body.connection_url or 'unknown'}")
+
+    return {
+        "success": True,
+        "agent_id": str(agent.id),
+        "agent_public_hash": agent_public_hash,
+        "tools": tools,
+        "endpoints": {
+            "heartbeat": "/agents/federation/heartbeat",
+            "execute_tool": "/agents/execute-tool-direct",
+            "tools_list": "/agents/tools/list",
+            "execute": f"/agents/{agent.id}/execute",
+        },
+        "message": f"Agent '{body.name}' registered. Use heartbeat endpoint to stay connected.",
+    }
+
+
+@router.post("/federation/heartbeat")
+async def federation_heartbeat(
+    body: FederationHeartbeatRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Heartbeat from a federated agent running on user hardware."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    result = await db.execute(
+        select(AgentDefinition).where(
+            AgentDefinition.id == body.agent_id,
+            AgentDefinition.user_id == user_id,
+            AgentDefinition.agent_source == "federated",
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Federated agent not found")
+
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+
+    # Update federation metadata
+    config = agent.openclaw_config or {}
+    config["last_heartbeat"] = now.isoformat()
+    config["status"] = body.status
+    if body.metrics:
+        config["last_metrics"] = body.metrics
+    agent.openclaw_config = config
+
+    # Force SQLAlchemy to detect the JSONB change
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(agent, "openclaw_config")
+
+    await db.commit()
+
+    return {"success": True, "agent_id": body.agent_id, "status": body.status, "ack": now.isoformat()}
+
+
+@router.get("/federation/agents")
+async def federation_list_agents(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """List all federated agents for the authenticated user with connection status."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    result = await db.execute(
+        select(AgentDefinition).where(
+            AgentDefinition.user_id == user_id,
+            AgentDefinition.agent_source == "federated",
+            AgentDefinition.is_active == True,
+        )
+    )
+    agents = result.scalars().all()
+
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+
+    items = []
+    for a in agents:
+        config = a.openclaw_config or {}
+        last_hb = config.get("last_heartbeat")
+        online = False
+        if last_hb:
+            try:
+                hb_time = datetime.fromisoformat(last_hb)
+                online = (now - hb_time).total_seconds() < 300  # 5 min threshold
+            except Exception:
+                pass
+
+        items.append({
+            "agent_id": str(a.id),
+            "name": a.name,
+            "description": a.description,
+            "connection_url": config.get("connection_url"),
+            "client_version": config.get("client_version"),
+            "hardware_info": config.get("hardware_info"),
+            "capabilities": config.get("capabilities", []),
+            "status": "online" if online else "offline",
+            "last_heartbeat": last_hb,
+            "tools": a.tools or [],
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        })
+
+    return {"agents": items, "total": len(items)}
+
+
+@router.post("/federation/disconnect/{agent_id}")
+async def federation_disconnect(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Disconnect a federated agent (marks inactive, keeps data)."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    result = await db.execute(
+        select(AgentDefinition).where(
+            AgentDefinition.id == agent_id,
+            AgentDefinition.user_id == user_id,
+            AgentDefinition.agent_source == "federated",
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Federated agent not found")
+
+    agent.is_active = False
+    config = agent.openclaw_config or {}
+    config["status"] = "disconnected"
+    config["disconnected_at"] = datetime.now().isoformat()
+    agent.openclaw_config = config
+
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(agent, "openclaw_config")
+
+    await db.commit()
+
+    logger.info(f"[FEDERATION] Disconnected agent '{agent.name}' ({agent_id})")
+    return {"success": True, "agent_id": agent_id, "status": "disconnected"}
+
+
 @router.get("/capabilities")
 async def list_agent_capabilities():
     from .agent_executor import get_agent_executor

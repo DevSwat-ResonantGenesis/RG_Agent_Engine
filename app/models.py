@@ -58,9 +58,10 @@ class AgentDefinition(Base):
     published_as_api = Column(Boolean, default=False)
     api_rate_limit = Column(Integer, default=60)  # requests per minute
     
-    # Legacy columns kept for DB compatibility (OpenClaw removed Apr 2026)
+    # Federation: "cloud" = platform-hosted, "federated" = runs on user hardware
     agent_source = Column(String(32), default="cloud", nullable=False)
-    openclaw_config = Column(JSONB, nullable=True)
+    # Federation metadata: {last_heartbeat, connection_url, hardware_info, client_version, capabilities}
+    openclaw_config = Column(JSONB, nullable=True)  # DB column name kept for compat, used as federation_config
     
     archived_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
