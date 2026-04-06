@@ -2291,10 +2291,10 @@ async def federation_disconnect(
 
 @router.get("/capabilities")
 async def list_agent_capabilities():
-    from .agent_executor import get_agent_executor
-
-    executor = await get_agent_executor()
-    tools = executor.tool_registry.get_all_schemas()
+    from .rg_tool_registry.builtin_tools import build_registry
+    from .rg_tool_registry.registry import ToolAccess
+    registry = build_registry()
+    tools = [t.to_openai() for t in registry.get_tools(access=ToolAccess.AGENT)]
 
     bundles = [
         CapabilityBundle(

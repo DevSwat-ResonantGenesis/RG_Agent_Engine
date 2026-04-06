@@ -415,17 +415,20 @@ Respond in JSON:
             logger.error(f"Obstacle resolution failed: {e}")
     
     async def _execute_strategy(self, goal: AutonomousGoal, strategy: str) -> bool:
-        """Execute a strategy to overcome an obstacle."""
-        from .agent_executor import get_agent_executor
-        
+        """Execute a strategy to overcome an obstacle via real executor."""
         try:
-            executor = await get_agent_executor()
-            result = await executor.execute(
-                agent_id=goal.agent_id,
-                task=f"Execute this strategy: {strategy}",
-                context={"goal": goal.description},
-            )
-            return result.success
+            from .executor import agent_executor as real_executor
+            from .db import async_session
+            from .models import AgentDefinition
+            async with async_session() as db:
+                agent = await db.get(AgentDefinition, goal.agent_id)
+                if not agent:
+                    return False
+                await real_executor.run_session(
+                    agent, f"Execute this strategy: {strategy}",
+                    {"goal": goal.description},
+                )
+            return True
         except Exception as e:
             logger.error(f"Strategy execution failed: {e}")
             return False

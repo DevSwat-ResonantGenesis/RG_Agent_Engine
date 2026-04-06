@@ -126,27 +126,8 @@ class TaskGenerator:
         return tasks
     
     async def generate_from_proactive(self, agent_id: str) -> List[AutonomousTask]:
-        """Generate tasks from proactive detection."""
-        from .proactive_behavior import get_proactive_system
-        
-        tasks = []
-        try:
-            system = await get_proactive_system()
-            proactive_tasks = system.get_pending_tasks(agent_id)
-            
-            for pt in proactive_tasks[:3]:  # Limit
-                task = AutonomousTask(
-                    id=str(uuid4()),
-                    description=pt.description,
-                    source=TaskSource.PROACTIVE,
-                    priority=TaskPriority.LOW if pt.priority < 0.5 else TaskPriority.MEDIUM,
-                    context={"proactive_task_id": pt.id, "reason": pt.reason},
-                )
-                tasks.append(task)
-        except:
-            pass
-        
-        return tasks
+        """Generate tasks from proactive detection. (Module removed — returns empty.)"""
+        return []
     
     async def generate_maintenance_tasks(self) -> List[AutonomousTask]:
         """Generate system maintenance tasks."""
@@ -299,18 +280,20 @@ class AutonomousTaskQueue:
         task.attempts += 1
         
         try:
-            from .agent_executor import get_agent_executor
-            executor = await get_agent_executor()
-            
-            result = await executor.execute(
-                agent_id=task.assigned_agent,
-                task=task.description,
-                context=task.context,
-            )
+            from .executor import agent_executor as real_executor
+            from .db import async_session
+            from .models import AgentDefinition, AgentSession
+            async with async_session() as db:
+                agent = await db.get(AgentDefinition, task.assigned_agent)
+                if not agent:
+                    raise ValueError(f"Agent {task.assigned_agent} not found")
+                result_data = await real_executor.run_session(
+                    agent, task.description, task.context or {},
+                )
             
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now(timezone.utc).isoformat()
-            task.result = {"success": result.success, "output": result.output}
+            task.result = {"success": True, "output": str(result_data)[:500] if result_data else ""}
             
             logger.info(f"Task completed autonomously: {task.description[:50]}")
             
