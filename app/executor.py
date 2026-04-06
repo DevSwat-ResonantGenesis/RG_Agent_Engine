@@ -216,7 +216,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "platform_api": self._tool_platform_api,
             "discover_services": self._tool_discover_services,
             "discover_api": self._tool_discover_api,
-            # === DYNAMIC TOOL MANAGEMENT (OpenClaw + Agent Engine + Chat) ===
+            # === DYNAMIC TOOL MANAGEMENT ===
             "create_tool": self._tool_create_tool,
             "list_tools": self._tool_list_tools,
             "delete_tool": self._tool_delete_tool,
@@ -1834,8 +1834,6 @@ Answer questions directly. Only perform actions when explicitly asked."""
 
     # Patterns for empty/meaningless goals that waste tokens
     _EMPTY_GOAL_PATTERNS = [
-        re.compile(r"^process\s+openclaw\s+event:\s*incoming\s*$", re.IGNORECASE),
-        re.compile(r"^process\s+openclaw\s+event:\s*$", re.IGNORECASE),
         re.compile(r"^incoming\s*$", re.IGNORECASE),
         re.compile(r"^event:\s*$", re.IGNORECASE),
         re.compile(r"^none\s*$", re.IGNORECASE),
@@ -2746,7 +2744,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
 
     # ------------------------------------------------------------------
     # Dynamic Tool Management — delegates to routers_agentic_chat handlers
-    # These let OpenClaw agents + Agent Engine sessions create/manage tools
+    # These let Agent Engine sessions create/manage tools
     # ------------------------------------------------------------------
 
     async def _tool_create_tool(self, tool_input: dict, session=None):

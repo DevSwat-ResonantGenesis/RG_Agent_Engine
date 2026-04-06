@@ -386,9 +386,6 @@ class AgentCreate(BaseModel):
     safety_config: Optional[Dict[str, Any]] = None
     allowed_actions: Optional[List[str]] = None
     blocked_actions: Optional[List[str]] = None
-    # OpenClaw federation
-    agent_source: Optional[str] = "cloud"  # cloud | openclaw
-    openclaw_config: Optional[Dict[str, Any]] = None
 
 
 class AgentResponse(BaseModel):
@@ -406,9 +403,6 @@ class AgentResponse(BaseModel):
     agent_public_hash: Optional[str] = None
     agent_version_hash: Optional[str] = None
     dsid: Optional[str] = None
-    # OpenClaw federation
-    agent_source: str = "cloud"
-    openclaw_config: Optional[Dict[str, Any]] = None
 
 
 class SessionCreate(BaseModel):
@@ -1585,9 +1579,7 @@ async def create_agent(
         if resolved_tool_mode not in ("smart", "manual"):
             resolved_tool_mode = "smart"
 
-        resolved_source = (payload.agent_source or "cloud").strip().lower()
-        if resolved_source not in ("cloud", "openclaw"):
-            resolved_source = "cloud"
+        resolved_source = "cloud"
 
         org_id_raw = request.headers.get("x-org-id")
         org_uuid = None
@@ -1617,7 +1609,6 @@ async def create_agent(
             agent_public_hash=agent_public_hash,
             agent_version_hash=str(safety_config.get("manifest_hash") or ""),
             agent_source=resolved_source,
-            openclaw_config=payload.openclaw_config,
         )
 
         session.add(agent)
@@ -1645,8 +1636,6 @@ async def create_agent(
             agent_public_hash=agent.agent_public_hash,
             agent_version_hash=agent.agent_version_hash,
             dsid=(agent.safety_config or {}).get("dsid"),
-            agent_source=getattr(agent, 'agent_source', None) or 'cloud',
-            openclaw_config=getattr(agent, 'openclaw_config', None),
         )
     except HTTPException:
         # Re-raise HTTPException without wrapping (e.g., 429 agent limit)
@@ -1739,8 +1728,6 @@ async def list_agents(
                     agent_public_hash=a.agent_public_hash,
                     agent_version_hash=a.agent_version_hash,
                     dsid=(a.safety_config or {}).get("dsid"),
-                    agent_source=getattr(a, 'agent_source', None) or 'cloud',
-                    openclaw_config=getattr(a, 'openclaw_config', None),
                 )
             )
 
@@ -1934,7 +1921,6 @@ async def instantiate_agent_template(
         agent_version_hash=agent.agent_version_hash,
         dsid=(agent.safety_config or {}).get("dsid"),
         agent_source=getattr(agent, 'agent_source', None) or 'cloud',
-        openclaw_config=getattr(agent, 'openclaw_config', None),
     )
 
 
@@ -1971,7 +1957,7 @@ async def list_available_tools():
 async def execute_tool_direct(request: Request):
     """Execute a platform tool directly (no agent session required).
 
-    Used by OpenClaw service, external integrations, and inter-service calls.
+    Used by external integrations and inter-service calls.
     Body: {tool_name: str, tool_input: dict, user_id?: str}
     """
     from .executor import AgentExecutor
@@ -2040,11 +2026,20 @@ async def execute_tool_direct(request: Request):
 
 
 @router.get("/tools/list")
-async def list_platform_tools_for_openclaw():
-    """List all platform tools with descriptions (used by OpenClaw federation)."""
-    from .openclaw_bridge import get_openclaw_bridge
-    bridge = get_openclaw_bridge()
-    return await bridge.list_platform_tools()
+async def list_platform_tools():
+    """List all platform tools with descriptions."""
+    from .rg_tool_registry.builtin_tools import build_registry
+    registry = build_registry()
+    all_tools = registry.get_all()
+    return [
+        {
+            "name": td.name,
+            "description": td.description,
+            "category": td.category.value if hasattr(td.category, 'value') else str(td.category),
+            "params": [p.to_dict() if hasattr(p, 'to_dict') else {"name": p.name} for p in (td.params or [])],
+        }
+        for td in all_tools
+    ]
 
 
 @router.get("/capabilities")
@@ -2393,7 +2388,7 @@ async def list_agent_versions(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid agent_id")
 
-    user_id = request.headers.get("x-user-id") if request else None
+    user_id = request.headers.get("x-user-id")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID required")
 
@@ -2500,7 +2495,6 @@ async def get_agent(
         agent_version_hash=agent.agent_version_hash,
         dsid=(agent.safety_config or {}).get("dsid"),
         agent_source=getattr(agent, 'agent_source', None) or 'cloud',
-        openclaw_config=getattr(agent, 'openclaw_config', None),
     )
 
 

@@ -22,7 +22,7 @@ from enum import Enum
 class ServiceCategory(str, Enum):
     CORE = "core"                    # Auth, users, billing, gateway
     AI = "ai"                        # LLM, memory, cognitive, ML
-    AGENTS = "agents"                # Agent engine, architect, OpenClaw
+    AGENTS = "agents"                # Agent engine, architect, cascade control
     COMMUNITY = "community"          # Rabbit (posts, communities, votes, moderation)
     DEVELOPER = "developer"          # ED service, code exec, sandbox, build, AST, IDE
     INTEGRATIONS = "integrations"    # Discord, notifications, workflow
@@ -139,20 +139,6 @@ _reg(ServiceDef(
     description="Agent Architect — design, plan, create agents with goal crafting pipeline",
     capabilities=["brainstorm", "craft_goal", "create_agent", "review_agent",
                    "list_tools", "list_providers", "assign_goal", "set_autonomy"],
-    auth="internal",
-))
-_reg(ServiceDef(
-    name="openclaw_gateway", url="http://openclaw_gateway:18789", category=ServiceCategory.AGENTS,
-    description="OpenClaw agent gateway — external hardware agent connections via WebSocket",
-    capabilities=["connect_agent", "relay_task", "import_skills", "governance_status",
-                   "agent_heartbeat", "custom_skill_register"],
-    auth="internal",
-))
-_reg(ServiceDef(
-    name="openclaw", url="http://openclaw_service:8000", category=ServiceCategory.AGENTS,
-    description="OpenClaw service — agent registration, federation, skill management",
-    capabilities=["register_agent", "list_agents", "agent_status", "skill_import",
-                   "federation_status"],
     auth="internal",
 ))
 _reg(ServiceDef(

@@ -358,7 +358,6 @@ async def trigger_agent_webhook(
         raise HTTPException(status_code=404, detail="Webhook trigger not found for this agent")
 
     # Internal services can bypass signature verification with valid INTERNAL_SERVICE_KEY
-    # This is used by OpenClaw service and other internal microservices
     is_internal = False
     if x_internal_service_key and settings.INTERNAL_SERVICE_KEY:
         is_internal = x_internal_service_key == settings.INTERNAL_SERVICE_KEY

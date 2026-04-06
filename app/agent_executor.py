@@ -207,11 +207,7 @@ class AgentExecutor:
         preferred_provider: str = None,
         preferred_model: str = None,
     ) -> ExecutionResult:
-        """Execute a task for an agent.
-        
-        Primary path: OpenClaw Gateway runtime (real autonomous loop).
-        Fallback: Legacy prompt→response loop if OpenClaw is unavailable.
-        """
+        """Execute a task for an agent using the unified tool registry."""
         task_id = str(uuid4())
         start_time = datetime.now(timezone.utc)
         
@@ -237,66 +233,7 @@ class AgentExecutor:
                     error="No credits remaining. Please add your own API keys or purchase credits.",
                 )
 
-        # ── PRIMARY: OpenClaw Gateway runtime ──
-        # Real autonomous agent loop: think → pick tools → execute → observe → loop
-        openclaw_result = await self._execute_via_openclaw(
-            agent_id=agent_id,
-            task=task,
-            context=context,
-            preferred_model=preferred_model,
-        )
-        if openclaw_result is not None:
-            # Record on blockchain
-            bc_client = await get_blockchain_client()
-            await bc_client.record_agent_action(
-                agent_id=agent_id,
-                action_type="task_execution",
-                action_data={
-                    "task": task,
-                    "success": openclaw_result.success,
-                    "tools_used": [e.get("name", "?") for e in openclaw_result.tool_events],
-                    "runtime": "openclaw",
-                },
-            )
-            # Record learning
-            learning = get_agent_learning(agent_id)
-            tools_names = [e.get("name", "?") for e in openclaw_result.tool_events]
-            learning.record_experience(
-                task_type="execution",
-                context=context or {},
-                action={"task": task, "tools": tools_names, "runtime": "openclaw"},
-                result={"answer": openclaw_result.output[:500]},
-                success=openclaw_result.success,
-            )
-            # Convert to ExecutionResult
-            reasoning_steps = []
-            if openclaw_result.reasoning:
-                reasoning_steps.append(ReasoningStep(
-                    step_number=1,
-                    thought=openclaw_result.reasoning[:1000],
-                ))
-            for i, evt in enumerate(openclaw_result.tool_events[:20], start=2):
-                reasoning_steps.append(ReasoningStep(
-                    step_number=i,
-                    thought=f"Using tool: {evt.get('name', '?')}",
-                    action=evt.get("name"),
-                    action_input=evt.get("input"),
-                    observation=str(evt.get("output", evt.get("result", "")))[:500],
-                ))
-
-            return ExecutionResult(
-                task_id=task_id,
-                success=openclaw_result.success,
-                output=openclaw_result.output,
-                reasoning_steps=reasoning_steps,
-                tools_used=tools_names,
-                duration_ms=openclaw_result.duration_ms,
-                error=openclaw_result.error,
-            )
-
-        # ── FALLBACK: Legacy prompt→response loop ──
-        logger.warning("[AgentExecutor] OpenClaw unavailable, using legacy loop")
-        return await self._execute_legacy_loop(
+        return await self._execute_agent_loop(
             agent_id=agent_id,
             task_id=task_id,
             task=task,
@@ -308,56 +245,7 @@ class AgentExecutor:
             start_time=start_time,
         )
 
-    async def _execute_via_openclaw(
-        self,
-        agent_id: str,
-        task: str,
-        context: Dict[str, Any] = None,
-        preferred_model: str = None,
-    ):
-        """Try executing via OpenClaw Gateway. Returns OpenClawResult or None if unavailable."""
-        try:
-            from .openclaw_bridge import get_openclaw_bridge
-            bridge = get_openclaw_bridge()
-
-            # Check health first (fast HTTP check)
-            health = await bridge.health_check()
-            if not health.get("ok"):
-                logger.warning(f"[AgentExecutor] OpenClaw not healthy: {health}")
-                return None
-
-            # Map model preference
-            model = None
-            if preferred_model:
-                model = preferred_model
-            elif context and context.get("model"):
-                model = context["model"]
-
-            # Build session key from agent_id
-            session_key = f"agent:rg-{agent_id[:12]}"
-
-            # Execute through OpenClaw runtime
-            result = await bridge.execute_agent_task(
-                message=task,
-                session_key=session_key,
-                model=model,
-                timeout=300,
-            )
-
-            logger.info(
-                f"[AgentExecutor] OpenClaw execution: success={result.success} "
-                f"tools={len(result.tool_events)} output_len={len(result.output)}"
-            )
-            return result
-
-        except ImportError:
-            logger.warning("[AgentExecutor] openclaw_bridge not available")
-            return None
-        except Exception as e:
-            logger.warning(f"[AgentExecutor] OpenClaw execution failed: {e}")
-            return None
-
-    async def _execute_legacy_loop(
+    async def _execute_agent_loop(
         self,
         agent_id: str,
         task_id: str,
