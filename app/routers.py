@@ -2360,6 +2360,25 @@ async def get_agent_run_metrics(
     }
 
 
+@router.get("/{agent_id}/collective-knowledge")
+async def agent_collective_knowledge(
+    agent_id: str,
+    query: Optional[str] = None,
+    request: Request = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Query collective knowledge for an agent. Delegates to collaboration hub if available."""
+    try:
+        from .agent_collaboration import get_collaboration_hub
+        hub = get_collaboration_hub()
+        if query:
+            results = await hub.knowledge.query_collective_knowledge(agent_id, query)
+            return {"results": results}
+        return {"results": [], "delegations": [], "agent_id": agent_id}
+    except Exception:
+        return {"results": [], "delegations": [], "agent_id": agent_id}
+
+
 @router.get("/{agent_id}/versions")
 async def list_agent_versions(
     agent_id: str,
