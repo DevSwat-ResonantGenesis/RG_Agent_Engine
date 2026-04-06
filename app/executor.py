@@ -376,20 +376,41 @@ Answer questions directly. Only perform actions when explicitly asked."""
             connect=5.0,
         )
 
+        _RETRYABLE_STATUSES = (502, 503, 504)
+        _MAX_RETRIES = 2
+        _RETRY_DELAY = 1.5
+
         t0 = time.monotonic()
         print(f"[SANDBOX-RUNNER] POST {runner_url}/v1/http-get url={url[:80]} timeout={timeout_seconds}", flush=True)
 
+        resp = None
+        last_error = None
+
         async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                resp = await client.post(
-                    f"{runner_url}/v1/http-get",
-                    json=payload,
-                    headers=headers,
-                )
-            except Exception as e:
-                elapsed = int((time.monotonic() - t0) * 1000)
-                print(f"[SANDBOX-RUNNER] FAILED {elapsed}ms: {e}", flush=True)
-                return {"error": f"Sandbox runner request failed: {e}"}
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    resp = await client.post(
+                        f"{runner_url}/v1/http-get",
+                        json=payload,
+                        headers=headers,
+                    )
+                    if resp.status_code not in _RETRYABLE_STATUSES or attempt == _MAX_RETRIES:
+                        break
+                    print(f"[SANDBOX-RUNNER] {resp.status_code} on attempt {attempt+1}, retrying in {_RETRY_DELAY}s...", flush=True)
+                    await asyncio.sleep(_RETRY_DELAY)
+                except Exception as e:
+                    last_error = e
+                    if attempt == _MAX_RETRIES:
+                        elapsed = int((time.monotonic() - t0) * 1000)
+                        print(f"[SANDBOX-RUNNER] FAILED {elapsed}ms after {attempt+1} attempts: {e}", flush=True)
+                        return {"error": f"Sandbox runner request failed: {e}"}
+                    print(f"[SANDBOX-RUNNER] attempt {attempt+1} failed ({e}), retrying in {_RETRY_DELAY}s...", flush=True)
+                    await asyncio.sleep(_RETRY_DELAY)
+
+        if resp is None:
+            elapsed = int((time.monotonic() - t0) * 1000)
+            print(f"[SANDBOX-RUNNER] FAILED {elapsed}ms: no response", flush=True)
+            return {"error": f"Sandbox runner request failed: {last_error or 'unknown'}"}
 
         elapsed = int((time.monotonic() - t0) * 1000)
 
