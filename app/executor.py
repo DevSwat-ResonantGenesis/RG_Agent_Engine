@@ -423,6 +423,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
             except Exception:
                 detail = None
             print(f"[SANDBOX-RUNNER] HTTP {resp.status_code} {elapsed}ms detail={detail}", flush=True)
+            if resp.status_code in _RETRYABLE_STATUSES:
+                return {"error": f"Website blocked automated access (anti-bot protection). Try a different source or website for this information."}
             return {"error": detail or f"Sandbox runner HTTP {resp.status_code}"}
 
         print(f"[SANDBOX-RUNNER] OK {resp.status_code} {elapsed}ms len={len(resp.content)}", flush=True)
