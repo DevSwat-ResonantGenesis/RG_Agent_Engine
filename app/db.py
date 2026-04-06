@@ -20,8 +20,8 @@ from sqlalchemy.pool import NullPool
 
 from .config import settings
 
-DB_POOL_SIZE = int(os.getenv("AGENT_ENGINE_DB_POOL_SIZE", "10"))
-DB_MAX_OVERFLOW = int(os.getenv("AGENT_ENGINE_DB_MAX_OVERFLOW", "20"))
+DB_POOL_SIZE = int(os.getenv("AGENT_ENGINE_DB_POOL_SIZE", "5"))
+DB_MAX_OVERFLOW = int(os.getenv("AGENT_ENGINE_DB_MAX_OVERFLOW", "5"))
 DB_POOL_TIMEOUT = int(os.getenv("AGENT_ENGINE_DB_POOL_TIMEOUT", "30"))
 DB_POOL_RECYCLE = int(os.getenv("AGENT_ENGINE_DB_POOL_RECYCLE", "1800"))
 DB_POOL_CLASS = (os.getenv("AGENT_ENGINE_DB_POOL_CLASS", "queue").strip().lower() or "queue")
