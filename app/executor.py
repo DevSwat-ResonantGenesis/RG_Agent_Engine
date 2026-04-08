@@ -1981,7 +1981,14 @@ Answer questions directly. Only perform actions when explicitly asked."""
         loop_stabilizer.reset()
         
         try:
-            while session.loop_count < settings.MAX_LOOP_ITERATIONS:
+            # Per-agent max_loops from safety_config, fallback to global setting
+            _agent_max_loops = settings.MAX_LOOP_ITERATIONS
+            if agent.safety_config and isinstance(agent.safety_config, dict):
+                _per_agent = agent.safety_config.get("max_loops")
+                if _per_agent and isinstance(_per_agent, int) and 1 <= _per_agent <= 100:
+                    _agent_max_loops = _per_agent
+
+            while session.loop_count < _agent_max_loops:
                 # Check if session was cancelled
                 await db_session.refresh(session)
                 if session.status in ("cancelled", "paused"):

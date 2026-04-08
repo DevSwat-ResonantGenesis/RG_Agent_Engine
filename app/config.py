@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     ED_SERVICE_URL: str = os.getenv("ED_SERVICE_URL", "http://ed_service:8000")
     
     # Safety limits
-    MAX_LOOP_ITERATIONS: int = 12
+    MAX_LOOP_ITERATIONS: int = 25
     MAX_TOKENS_PER_RUN: int = 50000
     MAX_TOOL_CALLS_PER_STEP: int = 20
     SAFETY_TIMEOUT_SECONDS: int = 300

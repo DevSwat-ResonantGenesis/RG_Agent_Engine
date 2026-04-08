@@ -2790,6 +2790,15 @@ async def patch_agent(
             setattr(agent, field, body[field])
             updated.append(field)
 
+    # Handle max_loops convenience field → store in safety_config
+    if "max_loops" in body:
+        max_loops_val = body["max_loops"]
+        if isinstance(max_loops_val, int) and 1 <= max_loops_val <= 100:
+            sc = dict(agent.safety_config or {})
+            sc["max_loops"] = max_loops_val
+            agent.safety_config = sc
+            updated.append("max_loops")
+
     if not updated:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
