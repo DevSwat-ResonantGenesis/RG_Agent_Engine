@@ -1891,6 +1891,31 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 await db_session.commit()
                 return {"status": "completed", "output": response_msg}
 
+        # === BUDGET ENFORCEMENT: max_runs_per_day ===
+        _agent_sc = agent.safety_config if isinstance(agent.safety_config, dict) else {}
+        _max_runs_per_day = _agent_sc.get("max_runs_per_day")
+        if _max_runs_per_day and isinstance(_max_runs_per_day, int) and _max_runs_per_day > 0:
+            try:
+                from sqlalchemy import func as sa_func
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                count_result = await db_session.execute(
+                    select(sa_func.count(AgentSession.id)).where(
+                        AgentSession.agent_id == agent.id,
+                        AgentSession.started_at >= today_start,
+                    )
+                )
+                today_count = count_result.scalar() or 0
+                if today_count > _max_runs_per_day:
+                    session.status = "failed"
+                    session.error_message = (
+                        f"Daily run limit exceeded: {today_count}/{_max_runs_per_day} runs today"
+                    )
+                    session.completed_at = datetime.utcnow()
+                    await db_session.commit()
+                    return {"status": "failed", "error": session.error_message}
+            except Exception as e:
+                logger.warning(f"[BUDGET] max_runs_per_day check failed (non-fatal): {e}")
+
         # Learning loop: track start time for session duration recording
         _loop_start_time = time.time()
         _step_history = []
@@ -1983,10 +2008,18 @@ Answer questions directly. Only perform actions when explicitly asked."""
         try:
             # Per-agent max_loops from safety_config, fallback to global setting
             _agent_max_loops = settings.MAX_LOOP_ITERATIONS
-            if agent.safety_config and isinstance(agent.safety_config, dict):
-                _per_agent = agent.safety_config.get("max_loops")
+            _agent_sc = agent.safety_config if isinstance(agent.safety_config, dict) else {}
+            if _agent_sc:
+                _per_agent = _agent_sc.get("max_loops")
                 if _per_agent and isinstance(_per_agent, int) and 1 <= _per_agent <= 100:
                     _agent_max_loops = _per_agent
+
+            # Per-agent max_tokens_per_run from safety_config (budget enforcement)
+            _agent_max_tokens = settings.MAX_TOKENS_PER_RUN
+            if _agent_sc.get("max_tokens_per_run"):
+                _per_agent_tokens = _agent_sc["max_tokens_per_run"]
+                if isinstance(_per_agent_tokens, int) and _per_agent_tokens > 0:
+                    _agent_max_tokens = _per_agent_tokens
 
             while session.loop_count < _agent_max_loops:
                 # Check if session was cancelled
@@ -2012,7 +2045,24 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 })
                 session.loop_count += 1
                 session.last_activity_at = datetime.utcnow()
-                
+
+                # === BUDGET ENFORCEMENT: per-agent token limit ===
+                if (session.total_tokens_used or 0) >= _agent_max_tokens:
+                    logger.warning(
+                        f"Session {session.id}: token budget exceeded "
+                        f"({session.total_tokens_used}/{_agent_max_tokens})"
+                    )
+                    session.status = "failed"
+                    session.error_message = (
+                        f"Token budget exceeded: used {session.total_tokens_used} "
+                        f"of {_agent_max_tokens} max_tokens_per_run"
+                    )
+                    session.completed_at = datetime.utcnow()
+                    await db_session.commit()
+                    result = {"status": "failed", "error": session.error_message}
+                    self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
+                    return result
+
                 # === VERIFICATION STEP (lightweight, no LLM call) ===
                 # Use hash-based loop detection only — the full LLM verifier
                 # doubles every LLM call and causes rate-limit hangs with Groq.

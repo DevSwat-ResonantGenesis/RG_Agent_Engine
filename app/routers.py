@@ -384,6 +384,7 @@ class AgentCreate(BaseModel):
     tools: Optional[List[str]] = None
     mode: Optional[str] = "governed"  # governed or unbounded
     safety_config: Optional[Dict[str, Any]] = None
+    budget_config: Optional[Dict[str, Any]] = None  # {max_tokens_per_run, max_runs_per_day}
     allowed_actions: Optional[List[str]] = None
     blocked_actions: Optional[List[str]] = None
 
@@ -1570,6 +1571,14 @@ async def create_agent(
         agent_id = uuid.uuid4()
         agent_public_hash = _compute_agent_public_hash(agent_id=str(agent_id), owner_user_id=str(user_uuid))
         safety_config["agent_hash"] = agent_public_hash
+
+        # Merge budget_config into safety_config for per-agent enforcement
+        if payload.budget_config and isinstance(payload.budget_config, dict):
+            bc = payload.budget_config
+            if bc.get("max_tokens_per_run"):
+                safety_config["max_tokens_per_run"] = int(bc["max_tokens_per_run"])
+            if bc.get("max_runs_per_day"):
+                safety_config["max_runs_per_day"] = int(bc["max_runs_per_day"])
 
         resolved_mode = (payload.mode or "governed").strip().lower()
         if resolved_mode not in ("governed", "unbounded"):

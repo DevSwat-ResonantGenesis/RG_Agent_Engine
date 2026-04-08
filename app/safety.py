@@ -251,13 +251,26 @@ class SafetyEnvelope:
         requires_approval = False
         session_id = str(agent_session.id) if agent_session else None
 
+        # Per-agent limits from safety_config, fallback to global
+        _sc = {}
+        if hasattr(agent_session, 'agent') and agent_session.agent:
+            _sc = agent_session.agent.safety_config if isinstance(getattr(agent_session.agent, 'safety_config', None), dict) else {}
+        _max_loops = settings.MAX_LOOP_ITERATIONS
+        _max_tokens = settings.MAX_TOKENS_PER_RUN
+        _sc_loops = _sc.get("max_loops")
+        if _sc_loops and isinstance(_sc_loops, int) and 1 <= _sc_loops <= 100:
+            _max_loops = _sc_loops
+        _sc_tokens = _sc.get("max_tokens_per_run")
+        if _sc_tokens and isinstance(_sc_tokens, int) and _sc_tokens > 0:
+            _max_tokens = _sc_tokens
+
         # Check loop limits
-        if agent_session.loop_count >= settings.MAX_LOOP_ITERATIONS:
-            violations.append(f"Max loop iterations ({settings.MAX_LOOP_ITERATIONS}) exceeded")
+        if agent_session.loop_count >= _max_loops:
+            violations.append(f"Max loop iterations ({_max_loops}) exceeded")
 
         # Check token limits
-        if agent_session.total_tokens_used >= settings.MAX_TOKENS_PER_RUN:
-            violations.append(f"Max tokens ({settings.MAX_TOKENS_PER_RUN}) exceeded")
+        if agent_session.total_tokens_used >= _max_tokens:
+            violations.append(f"Max tokens ({_max_tokens}) exceeded")
 
         # Check timeout
         if agent_session.started_at:
