@@ -2011,7 +2011,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
             _agent_sc = agent.safety_config if isinstance(agent.safety_config, dict) else {}
             if _agent_sc:
                 _per_agent = _agent_sc.get("max_loops")
-                if _per_agent and isinstance(_per_agent, int) and 1 <= _per_agent <= 100:
+                if _per_agent and isinstance(_per_agent, int) and _per_agent >= 1:
                     _agent_max_loops = _per_agent
 
             # Per-agent max_tokens_per_run from safety_config (budget enforcement)
@@ -2206,8 +2206,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
                 await asyncio.sleep(1.5)
 
             # Loop limit reached
-            session.status = "failed"
-            session.error_message = "Maximum loop iterations reached"
+            session.status = "completed"
+            session.error_message = "Completed (loop limit reached)"
             session.completed_at = datetime.utcnow()
             await db_session.commit()
             result = {"status": "failed", "error": "Maximum iterations reached"}

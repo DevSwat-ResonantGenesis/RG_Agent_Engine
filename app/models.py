@@ -27,7 +27,7 @@ class AgentDefinition(Base):
     provider = Column(String(64), nullable=True)  # e.g. openai, anthropic, groq, google, local
     model = Column(String(64), default="gpt-4-turbo-preview")
     temperature = Column(Float, default=0.7)
-    max_tokens = Column(Integer, default=4096)
+    max_tokens = Column(Integer, default=128000)
     
     # Capabilities
     tool_mode = Column(String(16), default="smart")  # smart = all tools auto, manual = only selected tools
