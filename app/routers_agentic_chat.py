@@ -35,33 +35,24 @@ _agentic_observer = _ToolObserver(system="agentic_chat")
 
 router = APIRouter(prefix="/agentic-chat", tags=["agentic-chat"])
 
-# ── Provider config sourced from rg_llm (single source of truth) ──
-from rg_llm import UnifiedLLMClient, LLMRequest
-from rg_llm.providers import BUILTIN_PROVIDERS
-from rg_llm.keys import resolve_api_key
+# ── LLM via unified HTTP service (no rg_llm dependency) ──
+from .executor import _llm_client, LLM_SERVICE_URL
 
-_llm_client = UnifiedLLMClient(
-    fallback_order=["openai", "anthropic", "google", "groq"],
-)
-
-# Local constants derived from rg_llm (used by _call_llm_with_tools)
-def _get_key(pid: str) -> str:
-    return resolve_api_key(BUILTIN_PROVIDERS[pid]) or ""
-
-GROQ_API_KEY = _get_key("groq")
-GROQ_API_URL = BUILTIN_PROVIDERS["groq"].base_url + "/chat/completions"
-OPENAI_API_KEY = _get_key("openai")
-OPENAI_API_URL = BUILTIN_PROVIDERS["openai"].base_url + "/chat/completions"
-ANTHROPIC_API_KEY = _get_key("anthropic")
-ANTHROPIC_API_URL = BUILTIN_PROVIDERS["anthropic"].base_url + "/messages"
-GEMINI_API_KEY = _get_key("google")
-GEMINI_API_URL = BUILTIN_PROVIDERS["google"].base_url
+# Provider API keys from environment (for direct-call fallback paths)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 PROVIDER_MODELS = {
-    "openai": BUILTIN_PROVIDERS["openai"].default_model,
-    "groq": BUILTIN_PROVIDERS["groq"].default_model,
-    "anthropic": BUILTIN_PROVIDERS["anthropic"].default_model,
-    "gemini": BUILTIN_PROVIDERS["google"].default_model,
+    "openai": os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o"),
+    "groq": os.getenv("GROQ_DEFAULT_MODEL", "llama-3.3-70b-versatile"),
+    "anthropic": os.getenv("ANTHROPIC_DEFAULT_MODEL", "claude-3-5-sonnet-20241022"),
+    "gemini": os.getenv("GOOGLE_DEFAULT_MODEL", "gemini-2.0-flash"),
 }
 PROVIDER_URLS = {
     "openai": OPENAI_API_URL,

@@ -71,17 +71,16 @@ Create a revised plan that addresses the issue while still achieving the goal.
 Respond in the same JSON format as before."""
 
     async def _call_llm_json(self, prompt: str, max_tokens: int = 2048) -> Optional[str]:
-        """Call LLM with JSON output via UnifiedLLMClient."""
+        """Call LLM with JSON output via HTTP LLM client."""
         from .executor import _llm_client
-        from rg_llm import LLMRequest
 
         try:
-            response = await _llm_client.complete(LLMRequest(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.5,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
-            ))
+            response = await _llm_client.complete({
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.5,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            })
             return response.content if response.content else None
         except Exception as e:
             logger.warning(f"[PLANNER] LLM call failed: {e}")

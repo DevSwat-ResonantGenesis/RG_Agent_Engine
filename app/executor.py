@@ -59,11 +59,62 @@ except ImportError:
 import logging
 logger = logging.getLogger(__name__)
 
-# ── Unified LLM Client (replaces direct provider constants) ──
-from rg_llm import UnifiedLLMClient, LLMRequest
-from rg_llm.providers import BUILTIN_PROVIDERS
+# ── LLM Client via unified HTTP service (no rg_llm dependency) ──
+LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm_service:8000").rstrip("/")
 
-_llm_client = UnifiedLLMClient(
+
+class _HTTPLLMResponse:
+    """Lightweight response wrapper matching the rg_llm interface."""
+    def __init__(self, content: str, provider: str, model: str, usage: dict, was_fallback: bool = False, fallback_chain: list = None):
+        self.content = content
+        self.provider = provider
+        self.model = model
+        self.usage = usage
+        self.was_fallback = was_fallback
+        self.fallback_chain = fallback_chain or []
+
+
+class _HTTPLLMClient:
+    """Calls the unified LLM service via HTTP — drop-in replacement for rg_llm."""
+
+    def __init__(self, fallback_order=None):
+        self.fallback_order = fallback_order or ["groq", "openai", "anthropic", "google"]
+
+    async def complete(self, request, user_keys=None):
+        payload = {
+            "messages": request.get("messages") if isinstance(request, dict) else getattr(request, "messages", []),
+            "stream": False,
+        }
+        # Extract fields from request (dict or object)
+        for field in ("provider", "model", "temperature", "max_tokens", "response_format", "tools"):
+            val = request.get(field) if isinstance(request, dict) else getattr(request, field, None)
+            if val is not None:
+                payload[field] = val
+        if user_keys:
+            payload["user_api_keys"] = user_keys
+
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                resp = await client.post(f"{LLM_SERVICE_URL}/v1/chat/completions", json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choice = (data.get("choices") or [{}])[0]
+                    msg = choice.get("message", {})
+                    return _HTTPLLMResponse(
+                        content=msg.get("content", ""),
+                        provider=data.get("provider", "unknown"),
+                        model=data.get("model", ""),
+                        usage=data.get("usage", {}),
+                    )
+                else:
+                    raise RuntimeError(f"LLM service returned {resp.status_code}: {resp.text[:200]}")
+        except httpx.TimeoutException:
+            raise RuntimeError("LLM service timed out")
+        except httpx.ConnectError:
+            raise RuntimeError("LLM service unreachable")
+
+
+_llm_client = _HTTPLLMClient(
     fallback_order=["groq", "openai", "anthropic", "google"],
 )
 
@@ -74,8 +125,6 @@ _INTERNAL_SERVICE_KEY = os.getenv("AUTH_INTERNAL_SERVICE_KEY") or os.getenv("INT
 
 # DSID-P Protocol Integration
 try:
-    import sys
-    sys.path.insert(0, '/Users/devswat/resonantgenesis_backend/blockchain_service')
     from app.reputation_trust import AgentTrustScore, get_trust_tier, TrustTier
     from app.semantic_taxonomy import SemanticRiskRating, get_agent_cluster
     DSIDP_AVAILABLE = True
@@ -2648,14 +2697,14 @@ Answer questions directly. Only perform actions when explicitly asked."""
         preferred = _alias.get(agent_provider.lower(), agent_provider.lower()) if agent_provider else None
 
         response = await _llm_client.complete(
-            LLMRequest(
-                messages=messages,
-                provider=preferred,
-                model=agent.model or None,
-                temperature=agent.temperature or 0.7,
-                max_tokens=agent.max_tokens or 2048,
-                response_format={"type": "json_object"},
-            ),
+            {
+                "messages": messages,
+                "provider": preferred,
+                "model": agent.model or None,
+                "temperature": agent.temperature or 0.7,
+                "max_tokens": agent.max_tokens or 2048,
+                "response_format": {"type": "json_object"},
+            },
             user_keys=user_keys,
         )
 
