@@ -59,6 +59,33 @@ from .webhooks import router as webhooks_router
 from .routers_discord import router as discord_router
 # AGENTIC CHAT REMOVED — now standalone service at RG_Registered_Users_Agentic_Chat
 # PUBLIC CHAT REMOVED — now standalone service at RG_Public/Guest_Agentic_Chat
+
+# Advanced intelligence routers (restored from RG_core)
+try:
+    from .routers_advanced import router as advanced_router
+except Exception:
+    advanced_router = None
+try:
+    from .routers_autonomous import router as autonomous_router
+except Exception:
+    autonomous_router = None
+try:
+    from .routers_full_autonomy import router as full_autonomy_router
+except Exception:
+    full_autonomy_router = None
+try:
+    from .routers_max_autonomy import router as max_autonomy_router
+except Exception:
+    max_autonomy_router = None
+try:
+    from .routers_orchestration import router as orchestration_router
+except Exception:
+    orchestration_router = None
+try:
+    from .routers_ultimate import router as ultimate_router
+except Exception:
+    ultimate_router = None
+
 from .db import engine
 
 logger = logging.getLogger(__name__)
@@ -87,6 +114,19 @@ app.include_router(negotiation_router)
 app.include_router(approval_router)
 app.include_router(dsidp_router)
 app.include_router(goals_router, prefix="/agents")
+
+# Advanced intelligence routers
+for _name, _rtr in [
+    ("advanced", advanced_router),
+    ("autonomous", autonomous_router),
+    ("full_autonomy", full_autonomy_router),
+    ("max_autonomy", max_autonomy_router),
+    ("orchestration", orchestration_router),
+    ("ultimate", ultimate_router),
+]:
+    if _rtr is not None:
+        app.include_router(_rtr)
+        logger.info(f"Router wired: {_name}")
 
 # Startup hook: mark orphaned "running" sessions as failed (they died with the previous process)
 @app.on_event("startup")
