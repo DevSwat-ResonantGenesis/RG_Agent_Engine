@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-POLL_INTERVAL = int(os.getenv("SCHEDULER_POLL_INTERVAL", "30"))  # seconds
+POLL_INTERVAL = int(os.getenv("SCHEDULER_POLL_INTERVAL", "60"))  # seconds
 MAX_CONCURRENT_SCHEDULED = int(os.getenv("SCHEDULER_MAX_CONCURRENT", "3"))
 
 _running = False
