@@ -2338,6 +2338,7 @@ async def federation_submit_result(
         session_obj.status = "completed" if body.get("success", True) else "failed"
         session_obj.loop_count = 1
         session_obj.total_tokens_used = len(str(body.get("output", ""))) // 4
+        session_obj.final_output = body.get("output", "")
 
         step = AgentStep(
             session_id=session_obj.id,
