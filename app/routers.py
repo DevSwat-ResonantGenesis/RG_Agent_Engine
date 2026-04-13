@@ -404,6 +404,8 @@ class AgentResponse(BaseModel):
     agent_public_hash: Optional[str] = None
     agent_version_hash: Optional[str] = None
     dsid: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class SessionCreate(BaseModel):
@@ -420,6 +422,8 @@ class SessionResponse(BaseModel):
     total_tokens_used: int
     final_output: Optional[str] = None
     error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
 
 
 class StepResponse(BaseModel):
@@ -1684,6 +1688,8 @@ async def list_agents(
                     agent_public_hash=a.agent_public_hash,
                     agent_version_hash=a.agent_version_hash,
                     dsid=(a.safety_config or {}).get("dsid"),
+                    created_at=a.created_at.isoformat() if a.created_at else None,
+                    updated_at=a.updated_at.isoformat() if a.updated_at else None,
                 )
             )
 
@@ -3086,6 +3092,8 @@ async def list_sessions(
             total_tokens_used=s.total_tokens_used,
             final_output=s.final_output if hasattr(s, 'final_output') else None,
             error_message=s.error_message if hasattr(s, 'error_message') else None,
+            created_at=s.created_at.isoformat() if s.created_at else None,
+            completed_at=s.completed_at.isoformat() if hasattr(s, 'completed_at') and s.completed_at else None,
         )
         for s in sessions
     ]
@@ -3116,6 +3124,8 @@ async def get_agent_session_detail(
         total_tokens_used=agent_session.total_tokens_used,
         final_output=agent_session.final_output if hasattr(agent_session, 'final_output') else None,
         error_message=agent_session.error_message if hasattr(agent_session, 'error_message') else None,
+        created_at=agent_session.created_at.isoformat() if agent_session.created_at else None,
+        completed_at=agent_session.completed_at.isoformat() if hasattr(agent_session, 'completed_at') and agent_session.completed_at else None,
     )
 
 
@@ -3141,6 +3151,8 @@ async def get_session_detail(
         total_tokens_used=agent_session.total_tokens_used,
         final_output=agent_session.final_output if hasattr(agent_session, 'final_output') else None,
         error_message=agent_session.error_message if hasattr(agent_session, 'error_message') else None,
+        created_at=agent_session.created_at.isoformat() if agent_session.created_at else None,
+        completed_at=agent_session.completed_at.isoformat() if hasattr(agent_session, 'completed_at') and agent_session.completed_at else None,
     )
 
 
