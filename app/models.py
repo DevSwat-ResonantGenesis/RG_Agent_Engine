@@ -134,6 +134,23 @@ class AgentSession(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class FederatedTask(Base):
+    """Task queued for a federated agent. Connector polls and picks these up."""
+    __tablename__ = "federated_tasks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String, nullable=False, index=True)
+    agent_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    session_id = Column(UUID(as_uuid=True), nullable=False)
+    goal = Column(Text, nullable=False)
+    context = Column(JSONB, nullable=True)
+    tools = Column(JSONB, nullable=True)
+    status = Column(String(32), default="pending", nullable=False, index=True)  # pending, dispatched, completed, failed
+    result = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class AgentStep(Base):
     """Individual step in agent execution loop."""
     __tablename__ = "agent_steps"

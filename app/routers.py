@@ -2252,6 +2252,114 @@ async def federation_disconnect(
     return {"success": True, "agent_id": agent_id, "status": "disconnected"}
 
 
+# ─── Federated Task Queue ─────────────────────────────────────────────
+# Tasks are queued here when user clicks "Run" on a federated agent.
+# The local connector polls GET /federation/tasks/poll to pick them up.
+# Zero inbound connections needed — all traffic is outbound HTTPS.
+
+@router.get("/federation/tasks/poll")
+async def federation_poll_tasks(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Poll for pending tasks assigned to the authenticated user's federated agents.
+    The local OpenClaw connector calls this periodically (every 3-5s).
+    Returns the oldest pending task and marks it as 'dispatched'.
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    from .models import FederatedTask
+    result = await db.execute(
+        select(FederatedTask)
+        .where(
+            FederatedTask.user_id == user_id,
+            FederatedTask.status == "pending",
+        )
+        .order_by(FederatedTask.created_at.asc())
+        .limit(1)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        return {"task": None}
+
+    task.status = "dispatched"
+    await db.commit()
+
+    return {
+        "task": {
+            "task_id": str(task.id),
+            "session_id": str(task.session_id),
+            "agent_id": str(task.agent_id),
+            "goal": task.goal,
+            "context": task.context or {},
+            "tools": task.tools or [],
+            "created_at": task.created_at.isoformat(),
+        }
+    }
+
+
+@router.post("/federation/tasks/{task_id}/result")
+async def federation_submit_result(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Submit the result of a federated task execution.
+    Called by the local connector after it finishes running the task.
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    body = await request.json()
+
+    from .models import FederatedTask, AgentSession, AgentStep
+    result = await db.execute(
+        select(FederatedTask).where(
+            FederatedTask.id == task_id,
+            FederatedTask.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task.status = "completed" if body.get("success", True) else "failed"
+    task.result = body
+
+    # Update the session with the result
+    sess_result = await db.execute(
+        select(AgentSession).where(AgentSession.id == task.session_id)
+    )
+    session_obj = sess_result.scalar_one_or_none()
+    if session_obj:
+        session_obj.status = "completed" if body.get("success", True) else "failed"
+        session_obj.loop_count = 1
+        session_obj.total_tokens_used = len(str(body.get("output", ""))) // 4
+
+        step = AgentStep(
+            session_id=session_obj.id,
+            step_number=0,
+            action="federated_execution",
+            reasoning=f"Task executed by local OpenClaw connector",
+            output_data={
+                "output": body.get("output", ""),
+                "tools_used": body.get("tools_used", []),
+                "duration_ms": body.get("duration_ms", 0),
+                "federated": True,
+            },
+            status="completed" if body.get("success", True) else "failed",
+            duration_ms=body.get("duration_ms", 0),
+        )
+        db.add(step)
+
+    await db.commit()
+    logger.info(f"[FEDERATION] Task {task_id} result submitted: {task.status}")
+    return {"success": True, "task_id": task_id, "status": task.status}
+
+
 @router.patch("/{agent_id}/mode")
 async def update_agent_mode(
     agent_id: str,
@@ -3090,11 +3198,8 @@ async def start_session(
     if "unlimited_credits" not in merged_context:
         merged_context["unlimited_credits"] = unlimited_credits
 
-    # ── Federated agent dispatch: send task to local OpenClaw connector ──
+    # ── Federated agent dispatch: queue task for local connector to poll ──
     if getattr(agent, "agent_source", None) == "federated":
-        config = agent.openclaw_config or {}
-        connection_url = (config.get("connection_url") or "").rstrip("/")
-
         # Create session record so the UI can track it
         agent_session = await agent_executor.start_session(
             agent=agent,
@@ -3103,76 +3208,28 @@ async def start_session(
             user_id=user_id,
             db_session=session,
         )
+        agent_session.status = "queued"
 
-        if not connection_url:
-            agent_session.status = "failed"
-            agent_session.error = "Federated agent has no connection_url. Start your local OpenClaw connector."
-            await session.commit()
-            return SessionResponse(
-                id=str(agent_session.id), agent_id=str(agent_session.agent_id),
-                status="failed", current_goal=agent_session.current_goal,
-                loop_count=0, total_tokens_used=0,
-            )
+        # Queue the task — local connector will poll and pick it up
+        from .models import FederatedTask
+        federated_task = FederatedTask(
+            user_id=user_id,
+            agent_id=agent.id,
+            session_id=agent_session.id,
+            goal=payload.goal,
+            context=merged_context,
+            tools=agent.tools or [],
+            status="pending",
+        )
+        session.add(federated_task)
+        await session.commit()
 
-        import time as _time
-        t0 = _time.time()
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as hc:
-                resp = await hc.post(
-                    f"{connection_url}/task/execute",
-                    json={
-                        "task": payload.goal,
-                        "agent_id": agent_id,
-                        "context": merged_context,
-                        "available_tools": agent.tools or [],
-                    },
-                    headers={"x-user-id": user_id or ""},
-                )
-            elapsed = int((_time.time() - t0) * 1000)
-
-            if resp.status_code < 400:
-                data = resp.json()
-                agent_session.status = "completed"
-                agent_session.loop_count = 1
-                agent_session.total_tokens_used = len(str(data.get("output", ""))) // 4
-                # Store output in first step
-                from .models import AgentStep
-                step = AgentStep(
-                    session_id=agent_session.id,
-                    step_number=0,
-                    action="federated_execution",
-                    reasoning=f"Task dispatched to local connector at {connection_url}",
-                    output_data={
-                        "output": data.get("output", ""),
-                        "tools_used": data.get("tools_used", []),
-                        "duration_ms": elapsed,
-                        "federated": True,
-                    },
-                    status="completed",
-                    duration_ms=elapsed,
-                )
-                session.add(step)
-                await session.commit()
-                logger.info(f"[FEDERATION] Task completed via {connection_url} in {elapsed}ms for agent {agent_id}")
-            else:
-                agent_session.status = "failed"
-                agent_session.error = f"Connector returned {resp.status_code}: {resp.text[:200]}"
-                await session.commit()
-        except httpx.ConnectError:
-            agent_session.status = "failed"
-            agent_session.error = f"Cannot reach local OpenClaw connector at {connection_url}. Make sure it's running."
-            await session.commit()
-            logger.warning(f"[FEDERATION] ConnectError for agent {agent_id} at {connection_url}")
-        except Exception as e:
-            agent_session.status = "failed"
-            agent_session.error = f"Federated dispatch error: {str(e)}"
-            await session.commit()
-            logger.error(f"[FEDERATION] Dispatch error for agent {agent_id}: {e}")
+        logger.info(f"[FEDERATION] Task queued for agent '{agent.name}' ({agent_id}), session={agent_session.id}")
 
         return SessionResponse(
             id=str(agent_session.id), agent_id=str(agent_session.agent_id),
-            status=agent_session.status, current_goal=agent_session.current_goal,
-            loop_count=agent_session.loop_count, total_tokens_used=agent_session.total_tokens_used,
+            status="queued", current_goal=agent_session.current_goal,
+            loop_count=0, total_tokens_used=0,
         )
 
     # ── Cloud agent: run through server-side executor ──
