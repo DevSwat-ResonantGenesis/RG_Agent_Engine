@@ -319,7 +319,7 @@ Respond in JSON:
         # Check if we've seen this exact step before
         if step_hash in self.step_hashes[-10:]:
             count = self.step_hashes[-10:].count(step_hash)
-            if count >= 2:
+            if count >= 3:
                 return VerificationReport(
                     result=VerificationResult.LOOP_DETECTED,
                     confidence=0.95,
@@ -327,6 +327,15 @@ Respond in JSON:
                     issues=["Infinite loop detected"],
                     suggestions=["Force replan with different approach"],
                     should_rollback=True,
+                )
+            elif count >= 2:
+                return VerificationReport(
+                    result=VerificationResult.REJECTED,
+                    confidence=0.7,
+                    reasoning=f"You repeated the same step {count} times with identical results. Use the data you already have and respond, or try a DIFFERENT tool/approach.",
+                    issues=["Repeated step detected"],
+                    suggestions=["Use gathered data to respond", "Try different tool"],
+                    should_rollback=False,
                 )
 
         self.step_hashes.append(step_hash)

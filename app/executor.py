@@ -2225,7 +2225,7 @@ Answer questions directly. Only perform actions when explicitly asked."""
                     step_output=step_result.get("result", {}),
                     success=not step_result.get("error"),
                     confidence=verification.confidence,
-                    progress=0.1 if step_result.get("goal_achieved") else 0.0,
+                    progress=1.0 if step_result.get("goal_achieved") else (0.05 if not step_result.get("error") else 0.0),
                 )
                 
                 # Handle stability actions
