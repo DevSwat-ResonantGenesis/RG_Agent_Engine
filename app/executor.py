@@ -230,8 +230,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "web_search": self._tool_web_search,
             "fetch_url": self._tool_fetch_url,
             "read_webpage": self._tool_fetch_url,
-            "scrape_page": self._tool_fetch_url,
-            "deep_research": self._tool_web_search,
+            "scrape_page": self._tool_scrape_page,
+            "deep_research": self._tool_deep_research,
             "read_many_pages": self._tool_fetch_url,
             # Search variants (all wrap web_search with query prefix)
             "news_search": self._tool_news_search,
@@ -663,6 +663,42 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "abstract_url": data.get("AbstractURL"),
             "results": results[:10],
         }
+
+    async def _tool_scrape_page(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """scrape_page: flexible wrapper around fetch_url accepting various param names."""
+        inp = tool_input or {}
+        url = inp.get("url") or inp.get("page") or inp.get("website") or inp.get("link") or inp.get("target")
+        if not url or not isinstance(url, str):
+            # If user passed query-like param, treat as error with helpful message
+            return {"error": "Missing 'url'. Provide: {\"url\": \"https://example.com\"}"}
+        return await self._tool_fetch_url({"url": url}, session=session)
+
+    async def _tool_deep_research(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """deep_research: accepts query/topic/subject/url — searches web, optionally fetches page."""
+        inp = tool_input or {}
+        query = inp.get("query") or inp.get("topic") or inp.get("subject") or inp.get("search") or inp.get("question")
+        url = inp.get("url") or inp.get("page") or inp.get("link")
+
+        results = {}
+
+        # If a URL was provided, fetch it
+        if url and isinstance(url, str):
+            page_data = await self._tool_fetch_url({"url": url}, session=session)
+            results["page_content"] = page_data
+
+        # If a query was provided (or derive from URL), do web search
+        if query and isinstance(query, str):
+            search_data = await self._tool_web_search({"query": query}, session=session)
+            results["search_results"] = search_data
+        elif url and not query:
+            # No explicit query — derive one from the URL
+            search_data = await self._tool_web_search({"query": url}, session=session)
+            results["search_results"] = search_data
+
+        if not results:
+            return {"error": "Provide 'query' and/or 'url'. Example: {\"query\": \"topic to research\"}"}
+
+        return results
 
     def _is_public_address(self, ip: str) -> bool:
         try:
@@ -2771,18 +2807,43 @@ Answer questions directly. Only perform actions when explicitly asked."""
         if not content:
             raise RuntimeError(f"All LLM providers failed. Chain: {response.fallback_chain}")
 
-        # Parse JSON response (with regex fallback)
+        # Parse JSON response (with multiple fallback strategies)
+        parsed = None
+
+        # Strategy 1: Direct JSON parse
         try:
             parsed = json.loads(content)
         except Exception:
+            pass
+
+        # Strategy 2: Strip markdown fences (```json ... ```)
+        if parsed is None:
+            stripped = re.sub(r"^```(?:json)?\s*\n?", "", content.strip(), flags=re.IGNORECASE)
+            stripped = re.sub(r"\n?```\s*$", "", stripped.strip())
+            if stripped != content.strip():
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    pass
+
+        # Strategy 3: Regex extract first JSON object
+        if parsed is None:
             m = re.search(r"\{.*\}", content, flags=re.DOTALL)
             if m:
                 try:
                     parsed = json.loads(m.group(0))
                 except Exception:
-                    raise RuntimeError(f"Unparseable JSON from {response.provider}: {content[:200]}")
-            else:
-                raise RuntimeError(f"Non-JSON content from {response.provider}: {content[:200]}")
+                    pass
+
+        # Strategy 4: LLM returned plain text — wrap as a respond action
+        if parsed is None:
+            logger.warning(f"[LLM] Non-JSON from {response.provider}, wrapping as respond: {content[:120]}")
+            parsed = {
+                "reasoning": "LLM returned non-JSON text; treating as direct response.",
+                "action": "respond",
+                "response": content[:4000],
+                "goal_achieved": False,
+            }
 
         parsed["_tokens_used"] = tokens_used
         logger.info(f"[LLM] Success via {response.provider}/{response.model} ({tokens_used} tokens, fallback={response.was_fallback})")
