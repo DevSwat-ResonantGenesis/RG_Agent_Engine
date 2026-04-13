@@ -95,7 +95,7 @@ class _HTTPLLMClient:
 
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
-                resp = await client.post(f"{LLM_SERVICE_URL}/v1/chat/completions", json=payload)
+                resp = await client.post(f"{LLM_SERVICE_URL}/llm/chat/completions", json=payload)
                 if resp.status_code == 200:
                     data = resp.json()
                     choice = (data.get("choices") or [{}])[0]
@@ -230,6 +230,8 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "web_search": self._tool_web_search,
             "fetch_url": self._tool_fetch_url,
             "read_webpage": self._tool_fetch_url,
+            "scrape_page": self._tool_fetch_url,
+            "deep_research": self._tool_web_search,
             # Memory
             "memory_read": self._tool_memory_read,
             "memory.read": self._tool_memory_read,

@@ -1483,59 +1483,6 @@ async def create_agent(
         except (ValueError, AttributeError):
             raise HTTPException(status_code=400, detail="Invalid user ID format")
         
-        # ============================================
-        # CHECK AGENT LIMIT (GTM Critical)
-        # ============================================
-        if user_id and not privileged_bypass:
-            import httpx
-            from sqlalchemy import func
-            
-            # Get user's plan from billing service
-            user_plan = "developer"
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        "http://billing_service:8001/billing/subscription",
-                        headers={"x-user-id": user_id},
-                        timeout=5.0,
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        user_plan = data.get("plan", "developer").lower()
-                        if data.get("is_dev"):
-                            user_plan = "unlimited"
-            except Exception:
-                pass  # Default to developer plan
-            
-            # Plan limits for agents
-            agent_limits = {
-                "developer": 3, "free": 3,
-                "plus": 20, "professional": 20,
-                "enterprise": -1, "unlimited": -1,
-            }
-            max_agents = agent_limits.get(user_plan, 3)
-            
-            # Count existing agents
-            if max_agents > 0:
-                count_result = await session.execute(
-                    select(func.count(AgentDefinition.id)).where(
-                        AgentDefinition.user_id == user_uuid
-                    )
-                )
-                current_count = count_result.scalar() or 0
-                
-                if current_count >= max_agents:
-                    raise HTTPException(
-                        status_code=429,
-                        detail={
-                            "error": "agent_limit_exceeded",
-                            "message": f"Agent limit reached ({current_count}/{max_agents}). Upgrade to Plus for 20 agents.",
-                            "used": current_count,
-                            "limit": max_agents,
-                            "upgrade_url": "/pricing"
-                        }
-                    )
-
         resolved_tools = payload.tools
         if resolved_tools is None:
             resolved_tools = ["web_search", "fetch_url"]
