@@ -2342,15 +2342,14 @@ async def federation_submit_result(
         step = AgentStep(
             session_id=session_obj.id,
             step_number=0,
-            action="federated_execution",
-            reasoning=f"Task executed by local OpenClaw connector",
+            step_type="federated_execution",
+            reasoning="Task executed by local OpenClaw connector",
             output_data={
                 "output": body.get("output", ""),
                 "tools_used": body.get("tools_used", []),
                 "duration_ms": body.get("duration_ms", 0),
                 "federated": True,
             },
-            status="completed" if body.get("success", True) else "failed",
             duration_ms=body.get("duration_ms", 0),
         )
         db.add(step)
