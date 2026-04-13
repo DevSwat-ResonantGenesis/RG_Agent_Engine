@@ -2632,13 +2632,13 @@ Respond in JSON:
                 await db_session.commit()
                 return {"error": f"Policy blocked: {policy_decision.reasons}"}
             
-            if policy_decision.decision == PolicyDecision.REQUIRE_APPROVAL:
+            if policy_decision.decision == PolicyDecision.REQUIRE_APPROVAL and agent_mode != 'unbounded':
                 step.required_approval = True
                 step.approval_status = "pending"
                 await db_session.commit()
                 return {"waiting_approval": True, "step_id": str(step.id), "reason": str(policy_decision.reasons)}
 
-            if requires_approval:
+            if requires_approval and agent_mode != 'unbounded':
                 step.required_approval = True
                 step.approval_status = "pending"
                 await db_session.commit()
