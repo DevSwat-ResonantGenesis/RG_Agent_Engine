@@ -2018,6 +2018,7 @@ class FederationRegisterRequest(BaseModel):
     tools: Optional[List[str]] = None  # platform tools to assign
     provider: str = "groq"
     model: str = "llama-3.3-70b-versatile"
+    mode: str = "unbounded"  # unbounded (default for federated) | governed | supervised
 
 
 class FederationHeartbeatRequest(BaseModel):
@@ -2072,10 +2073,10 @@ async def federation_register(
     agent_public_hash = hashlib.sha256(raw_hash.encode()).hexdigest()
 
     safety_config = {
-        "mode": "governed",
-        "max_steps_per_run": 25,
-        "max_tokens_per_run": 50000,
-        "rate_limit_per_minute": 30,
+        "mode": body.mode,
+        "max_steps_per_run": 200 if body.mode == "unbounded" else 25,
+        "max_tokens_per_run": 500000 if body.mode == "unbounded" else 50000,
+        "rate_limit_per_minute": 120 if body.mode == "unbounded" else 30,
         "federated": True,
     }
 
@@ -2096,7 +2097,7 @@ async def federation_register(
         agent_version_hash=hashlib.sha256(system_prompt.encode()).hexdigest(),
         agent_source="federated",
         openclaw_config=federation_config,  # DB column reused for federation metadata
-        mode="governed",
+        mode=body.mode,
         is_active=True,
     )
 
@@ -2249,6 +2250,64 @@ async def federation_disconnect(
 
     logger.info(f"[FEDERATION] Disconnected agent '{agent.name}' ({agent_id})")
     return {"success": True, "agent_id": agent_id, "status": "disconnected"}
+
+
+@router.patch("/{agent_id}/mode")
+async def update_agent_mode(
+    agent_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Toggle agent mode between governed and unbounded.
+    Body: {"mode": "unbounded"} or {"mode": "governed"}
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    body = await request.json()
+    new_mode = body.get("mode", "").strip().lower()
+    if new_mode not in ("governed", "unbounded", "supervised"):
+        raise HTTPException(status_code=400, detail="mode must be 'governed', 'unbounded', or 'supervised'")
+
+    result = await db.execute(
+        select(AgentDefinition).where(
+            AgentDefinition.id == agent_id,
+            AgentDefinition.user_id == user_id,
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    old_mode = agent.mode
+    agent.mode = new_mode
+
+    # Update safety_config limits based on mode
+    safety = agent.safety_config or {}
+    if new_mode == "unbounded":
+        safety["mode"] = "unbounded"
+        safety["max_steps_per_run"] = 200
+        safety["max_tokens_per_run"] = 500000
+        safety["rate_limit_per_minute"] = 120
+    elif new_mode == "governed":
+        safety["mode"] = "governed"
+        safety["max_steps_per_run"] = 25
+        safety["max_tokens_per_run"] = 50000
+        safety["rate_limit_per_minute"] = 30
+    else:  # supervised
+        safety["mode"] = "supervised"
+        safety["max_steps_per_run"] = 50
+        safety["max_tokens_per_run"] = 100000
+        safety["rate_limit_per_minute"] = 60
+    agent.safety_config = safety
+
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(agent, "safety_config")
+
+    await db.commit()
+    logger.info(f"[MODE] Agent '{agent.name}' ({agent_id}) mode changed: {old_mode} -> {new_mode}")
+    return {"success": True, "agent_id": agent_id, "mode": new_mode, "previous_mode": old_mode}
 
 
 @router.get("/capabilities")
