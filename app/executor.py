@@ -232,25 +232,52 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "read_webpage": self._tool_fetch_url,
             "scrape_page": self._tool_fetch_url,
             "deep_research": self._tool_web_search,
+            "read_many_pages": self._tool_fetch_url,
+            # Search variants (all wrap web_search with query prefix)
+            "news_search": self._tool_news_search,
+            "image_search": self._tool_image_search,
+            "youtube_search": self._tool_youtube_search,
+            "reddit_search": self._tool_reddit_search,
+            "wikipedia": self._tool_wikipedia,
+            "weather": self._tool_weather,
+            "stock_crypto": self._tool_stock_crypto,
+            "places_search": self._tool_places_search,
             # Memory
             "memory_read": self._tool_memory_read,
             "memory.read": self._tool_memory_read,
             "memory_write": self._tool_memory_write,
             "memory.write": self._tool_memory_write,
-            # Community
+            "memory_search": self._tool_memory_read,
+            "memory_stats": self._tool_memory_stats,
+            # Community (rabbit)
             "create_rabbit_post": self._tool_create_rabbit_post,
             "list_rabbit_communities": self._tool_list_rabbit_communities,
             "create_rabbit_community": self._tool_create_rabbit_community,
+            "list_rabbit_posts": self._tool_list_rabbit_posts,
+            "get_rabbit_post": self._tool_get_rabbit_post,
+            "get_rabbit_community": self._tool_get_rabbit_community,
+            "delete_rabbit_post": self._tool_delete_rabbit_post,
+            "create_rabbit_comment": self._tool_create_rabbit_comment,
+            "delete_rabbit_comment": self._tool_delete_rabbit_comment,
+            "list_rabbit_comments": self._tool_list_rabbit_comments,
+            "search_rabbit_posts": self._tool_search_rabbit_posts,
+            "rabbit_vote": self._tool_rabbit_vote,
             # Developer
             "http_request": self._tool_http_request,
             "external_http_request": self._tool_external_http_request,
             "execute_code": self._tool_execute_code,
             "dev_tool": self._tool_dev_bridge,
+            "run_command": self._tool_execute_code,
+            "get_current_time": self._tool_get_current_time,
+            "get_system_info": self._tool_get_system_info,
+            "send_email": self._tool_send_email,
             # Media
             "generate_image": self._tool_generate_image,
             "generate_audio": self._tool_generate_audio,
             "generate_music": self._tool_generate_music,
             "generate_video": self._tool_generate_video,
+            "generate_chart": self._tool_generate_chart,
+            "visualize": self._tool_generate_chart,
             # Integrations
             "gmail_send": self._tool_gmail_send,
             "gmail_read": self._tool_gmail_read,
@@ -265,15 +292,33 @@ Answer questions directly. Only perform actions when explicitly asked."""
             "sigma": self._tool_sigma,
             # === UNIFIED API CATALOG: Call any platform service API ===
             "platform_api": self._tool_platform_api,
+            "platform_api_call": self._tool_platform_api,
+            "platform_api_search": self._tool_discover_api,
             "discover_services": self._tool_discover_services,
             "discover_api": self._tool_discover_api,
             # === DYNAMIC TOOL MANAGEMENT ===
             "create_tool": self._tool_create_tool,
             "list_tools": self._tool_list_tools,
+            "list_workspace_tools": self._tool_list_tools,
             "delete_tool": self._tool_delete_tool,
             "update_tool": self._tool_update_tool,
             "auto_build_tool": self._tool_auto_build_tool,
             "check_tool_exists": self._tool_check_tool_exists,
+            # === Hash Sphere / Memory visualization ===
+            "hash_sphere_search": self._tool_hash_sphere,
+            "hash_sphere_anchor": self._tool_hash_sphere,
+            "hash_sphere_hash": self._tool_hash_sphere,
+            "hash_sphere_list_anchors": self._tool_hash_sphere,
+            "hash_sphere_resonance": self._tool_hash_sphere,
+            # === Session / snapshot ===
+            "workspace_snapshot": self._tool_workspace_snapshot,
+            "agent_snapshot": self._tool_workspace_snapshot,
+            "run_snapshot": self._tool_workspace_snapshot,
+            "session_log": self._tool_session_log,
+            "present_options": self._tool_present_options,
+            # Agent execution
+            "run_agent": self._tool_run_agent,
+            "schedule_agent": self._tool_schedule_agent,
         }
 
         # Tool-level sandbox boundary: rate limiting, arg validation, resource access control
@@ -885,29 +930,39 @@ Answer questions directly. Only perform actions when explicitly asked."""
     # ================================================================
 
     async def _tool_gmail_send(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Send an email via Gmail."""
-        from platform_tools.gmail import tool_gmail_send
-        return await tool_gmail_send(tool_input or {}, auth=self._build_auth_context(session))
+        """Send an email via Gmail integration."""
+        return await self._tool_platform_api({
+            "service": "notification", "endpoint": "/email/send", "method": "POST",
+            "body": tool_input or {},
+        }, session=session)
 
     async def _tool_gmail_read(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Read recent emails from Gmail inbox."""
-        from platform_tools.gmail import tool_gmail_read
-        return await tool_gmail_read(tool_input or {}, auth=self._build_auth_context(session))
+        return await self._tool_platform_api({
+            "service": "notification", "endpoint": "/email/inbox", "method": "GET",
+            "body": tool_input or {},
+        }, session=session)
 
     async def _tool_slack_send_message(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Send a message to a Slack channel."""
-        from platform_tools.slack import tool_slack_send_message
-        return await tool_slack_send_message(tool_input or {}, auth=self._build_auth_context(session))
+        return await self._tool_platform_api({
+            "service": "notification", "endpoint": "/slack/send", "method": "POST",
+            "body": tool_input or {},
+        }, session=session)
 
     async def _tool_slack_list_channels(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """List Slack channels."""
-        from platform_tools.slack import tool_slack_list_channels
-        return await tool_slack_list_channels(tool_input or {}, auth=self._build_auth_context(session))
+        return await self._tool_platform_api({
+            "service": "notification", "endpoint": "/slack/channels", "method": "GET",
+            "body": tool_input or {},
+        }, session=session)
 
     async def _tool_slack_read_messages(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Read recent messages from a Slack channel."""
-        from platform_tools.slack import tool_slack_read_messages
-        return await tool_slack_read_messages(tool_input or {}, auth=self._build_auth_context(session))
+        return await self._tool_platform_api({
+            "service": "notification", "endpoint": "/slack/messages", "method": "GET",
+            "body": tool_input or {},
+        }, session=session)
 
     async def _tool_external_http_request(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Make an HTTP request to an external (public) API.
@@ -2802,27 +2857,67 @@ Answer questions directly. Only perform actions when explicitly asked."""
             except Exception:
                 pass
 
-        # 4. Tool not found anywhere
+        # 4. Agent-management tools → self-call via platform_api to agent_engine
+        if tool_name.startswith("agents_") or tool_name.startswith("architect_"):
+            return await self._tool_agent_self_call(tool_name, tool_input or {}, session=session)
+
+        # 5. Code visualizer / state physics / skill_ → proxy via platform_api
+        SERVICE_PREFIX_MAP = {
+            "code_visualizer_": ("agent_engine", "/ast"),
+            "sp_": ("agent_engine", "/state-physics"),
+            "skill_": ("chat", "/skill"),
+            "github_": ("agent_engine", "/github"),
+        }
+        for prefix, (service, base_path) in SERVICE_PREFIX_MAP.items():
+            if tool_name.startswith(prefix):
+                action = tool_name[len(prefix):]
+                return await self._tool_platform_api({
+                    "service": service,
+                    "endpoint": f"{base_path}/{action}",
+                    "method": "POST",
+                    "body": tool_input or {},
+                }, session=session)
+
+        # 6. Last resort: try ed_service even if not in ED_SERVICE_TOOLS list
+        try:
+            from .config import settings
+            url = f"{settings.ED_SERVICE_URL}/tools/{tool_name}/execute"
+            headers = {}
+            if session:
+                headers["x-user-id"] = str(getattr(session, "user_id", "") or "")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=tool_input or {}, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("output", data)
+        except Exception:
+            pass
+
+        # 7. Tool not found anywhere
         logger.warning(f"Tool '{tool_name}' — no handler in map, not in ED_SERVICE_TOOLS, not proxied")
-        return {"error": f"Tool '{tool_name}' not found. Available: {', '.join(sorted(self._handler_map.keys())[:20])}..."}
+        return {"error": f"Tool '{tool_name}' not available. Use platform_api(service='...', endpoint='...') for custom calls."}
 
     # ------------------------------------------------------------------
     # Phase 1.3: ed_service tool proxy
     # ------------------------------------------------------------------
     ED_SERVICE_TOOLS = frozenset([
-        # File tools
+        # File tools (original names)
         "read_file", "write_file", "list_files", "search_files",
         "search_content", "delete_file", "validate_code",
+        # File tools (registry aliases)
+        "file_read", "file_write", "file_list", "file_edit", "file_delete",
+        "find_by_name", "grep_search", "multi_edit",
         # Git tools
         "git_clone", "git_status", "git_add", "git_commit", "git_push",
         "git_pull", "git_diff", "git_checkout", "git_log",
-        "git_apply_patch", "git_stash",
+        "git_apply_patch", "git_stash", "git_branch", "git_merge",
         # Docker tools
         "docker_build", "docker_run", "docker_stop", "docker_logs",
         "docker_exec", "docker_ps", "docker_images", "docker_rm",
         "docker_compose_up", "docker_compose_down",
         # Workflow / cognitive
         "trigger_workflow", "ask_llm", "log_insight", "get_current_time",
+        "command_status",
     ])
 
     async def _proxy_to_ed_service(
@@ -2889,6 +2984,173 @@ Answer questions directly. Only perform actions when explicitly asked."""
             if feedback:
                 lines.append(f"  FEEDBACK: {feedback}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Search variant tools — wrap web_search with category prefixes
+    # ------------------------------------------------------------------
+
+    async def _tool_news_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"latest news: {q}"}, session=session)
+
+    async def _tool_image_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"images of: {q}"}, session=session)
+
+    async def _tool_youtube_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"site:youtube.com {q}"}, session=session)
+
+    async def _tool_reddit_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"site:reddit.com {q}"}, session=session)
+
+    async def _tool_wikipedia(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query") or (tool_input or {}).get("topic", "")
+        return await self._tool_web_search({"query": f"site:wikipedia.org {q}"}, session=session)
+
+    async def _tool_weather(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        loc = (tool_input or {}).get("location") or (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"current weather in {loc}"}, session=session)
+
+    async def _tool_stock_crypto(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        sym = (tool_input or {}).get("symbol") or (tool_input or {}).get("query", "")
+        return await self._tool_web_search({"query": f"current price of {sym} stock crypto"}, session=session)
+
+    async def _tool_places_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        q = (tool_input or {}).get("query", "")
+        loc = (tool_input or {}).get("location", "")
+        return await self._tool_web_search({"query": f"places: {q} near {loc}"}, session=session)
+
+    # ------------------------------------------------------------------
+    # Rabbit community tools — proxy to rabbit service via platform_api
+    # ------------------------------------------------------------------
+
+    async def _tool_list_rabbit_posts(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": "/posts", "method": "GET", "body": tool_input or {}}, session=session)
+
+    async def _tool_get_rabbit_post(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        post_id = (tool_input or {}).get("post_id", "")
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": f"/posts/{post_id}", "method": "GET"}, session=session)
+
+    async def _tool_get_rabbit_community(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        slug = (tool_input or {}).get("slug", "")
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": f"/communities/{slug}", "method": "GET"}, session=session)
+
+    async def _tool_delete_rabbit_post(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        post_id = (tool_input or {}).get("post_id", "")
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": f"/posts/{post_id}", "method": "DELETE"}, session=session)
+
+    async def _tool_create_rabbit_comment(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": "/comments", "method": "POST", "body": tool_input or {}}, session=session)
+
+    async def _tool_delete_rabbit_comment(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        cid = (tool_input or {}).get("comment_id", "")
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": f"/comments/{cid}", "method": "DELETE"}, session=session)
+
+    async def _tool_list_rabbit_comments(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        post_id = (tool_input or {}).get("post_id", "")
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": f"/posts/{post_id}/comments", "method": "GET"}, session=session)
+
+    async def _tool_search_rabbit_posts(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": "/posts/search", "method": "POST", "body": tool_input or {}}, session=session)
+
+    async def _tool_rabbit_vote(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "rabbit", "endpoint": "/votes", "method": "POST", "body": tool_input or {}}, session=session)
+
+    # ------------------------------------------------------------------
+    # Info / utility tools
+    # ------------------------------------------------------------------
+
+    async def _tool_get_current_time(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return {"utc": now.isoformat(), "unix": int(now.timestamp()), "readable": now.strftime("%Y-%m-%d %H:%M:%S UTC")}
+
+    async def _tool_get_system_info(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return {"platform": "DevSwat Agent Engine", "version": "2.0", "tools_available": len(self._handler_map), "ed_service_tools": len(self.ED_SERVICE_TOOLS)}
+
+    async def _tool_send_email(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "notification", "endpoint": "/email/send", "method": "POST", "body": tool_input or {}}, session=session)
+
+    async def _tool_memory_stats(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "memory", "endpoint": "/memory/rag/stats", "method": "GET"}, session=session)
+
+    async def _tool_generate_chart(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_execute_code({"language": "python", "code": (tool_input or {}).get("code", "print('No chart code provided')")}, session=session)
+
+    # ------------------------------------------------------------------
+    # Hash Sphere tools — proxy to memory service
+    # ------------------------------------------------------------------
+
+    async def _tool_hash_sphere(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        action = (tool_input or {}).get("action", "search")
+        return await self._tool_platform_api({"service": "memory", "endpoint": f"/memory/hash-sphere/{action}", "method": "POST", "body": tool_input or {}}, session=session)
+
+    # ------------------------------------------------------------------
+    # Workspace / session / options tools
+    # ------------------------------------------------------------------
+
+    async def _tool_workspace_snapshot(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return await self._tool_platform_api({"service": "agent_engine", "endpoint": "/agents/", "method": "GET"}, session=session)
+
+    async def _tool_session_log(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        sid = (tool_input or {}).get("session_id", "")
+        return await self._tool_platform_api({"service": "agent_engine", "endpoint": f"/agents/sessions/{sid}/steps", "method": "GET"}, session=session)
+
+    async def _tool_present_options(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        return {"type": "PickOne", "question": (tool_input or {}).get("question", ""), "options": (tool_input or {}).get("options", [])}
+
+    async def _tool_run_agent(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        agent_id = (tool_input or {}).get("agent_id", "")
+        return await self._tool_platform_api({"service": "agent_engine", "endpoint": f"/agents/{agent_id}/start", "method": "POST", "body": tool_input or {}}, session=session)
+
+    async def _tool_schedule_agent(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        agent_id = (tool_input or {}).get("agent_id", "")
+        return await self._tool_platform_api({"service": "agent_engine", "endpoint": f"/agents/{agent_id}/schedules", "method": "POST", "body": tool_input or {}}, session=session)
+
+    # ------------------------------------------------------------------
+    # Agent self-call — agents_* and architect_* tools call own API
+    # ------------------------------------------------------------------
+
+    async def _tool_agent_self_call(self, tool_name: str, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        AGENT_ENDPOINTS = {
+            "agents_list": ("GET", "/agents/"),
+            "agents_create": ("POST", "/agents/"),
+            "agents_delete": ("DELETE", "/agents/{agent_id}"),
+            "agents_update": ("PATCH", "/agents/{agent_id}"),
+            "agents_status": ("GET", "/agents/{agent_id}"),
+            "agents_start": ("POST", "/agents/{agent_id}/start"),
+            "agents_stop": ("POST", "/agents/{agent_id}/stop"),
+            "agents_sessions": ("GET", "/agents/{agent_id}/sessions"),
+            "agents_metrics": ("GET", "/agents/metrics"),
+            "agents_available_tools": ("GET", "/agents/tools"),
+            "agents_templates": ("GET", "/agents/templates"),
+            "agents_versions": ("GET", "/agents/{agent_id}/versions"),
+            "agents_session_detail": ("GET", "/agents/sessions/{session_id}"),
+            "agents_session_steps": ("GET", "/agents/sessions/{session_id}/steps"),
+            "agents_session_cancel": ("POST", "/agents/sessions/{session_id}/cancel"),
+            "agents_session_trace": ("GET", "/agents/sessions/{session_id}/trace"),
+            "architect_create_agent": ("POST", "/agents/"),
+            "architect_plan": ("POST", "/agents/plan"),
+            "architect_list_available_tools": ("GET", "/agents/tools"),
+            "architect_list_providers": ("GET", "/agents/providers"),
+            "architect_assign_goal": ("POST", "/agents/{agent_id}/start"),
+            "architect_set_autonomy": ("PATCH", "/agents/{agent_id}"),
+            "architect_create_schedule": ("POST", "/agents/{agent_id}/schedules"),
+            "architect_create_webhook": ("POST", "/agents/{agent_id}/triggers"),
+            "run_agent": ("POST", "/agents/{agent_id}/start"),
+            "schedule_agent": ("POST", "/agents/{agent_id}/schedules"),
+        }
+        ep = AGENT_ENDPOINTS.get(tool_name)
+        if not ep:
+            return {"error": f"Unknown agent tool: {tool_name}"}
+        method, path = ep
+        for key in ["agent_id", "session_id"]:
+            if f"{{{key}}}" in path:
+                val = (tool_input or {}).get(key, "")
+                path = path.replace(f"{{{key}}}", str(val))
+        return await self._tool_platform_api({"service": "agent_engine", "endpoint": path, "method": method, "body": tool_input or {}}, session=session)
 
     # ------------------------------------------------------------------
     # Dynamic Tool Management — delegates to routers_agentic_chat handlers
