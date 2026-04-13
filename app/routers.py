@@ -3031,6 +3031,92 @@ async def start_session(
     if "unlimited_credits" not in merged_context:
         merged_context["unlimited_credits"] = unlimited_credits
 
+    # ── Federated agent dispatch: send task to local OpenClaw connector ──
+    if getattr(agent, "agent_source", None) == "federated":
+        config = agent.openclaw_config or {}
+        connection_url = (config.get("connection_url") or "").rstrip("/")
+
+        # Create session record so the UI can track it
+        agent_session = await agent_executor.start_session(
+            agent=agent,
+            goal=payload.goal,
+            initial_context=merged_context,
+            user_id=user_id,
+            db_session=session,
+        )
+
+        if not connection_url:
+            agent_session.status = "failed"
+            agent_session.error = "Federated agent has no connection_url. Start your local OpenClaw connector."
+            await session.commit()
+            return SessionResponse(
+                id=str(agent_session.id), agent_id=str(agent_session.agent_id),
+                status="failed", current_goal=agent_session.current_goal,
+                loop_count=0, total_tokens_used=0,
+            )
+
+        import time as _time
+        t0 = _time.time()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as hc:
+                resp = await hc.post(
+                    f"{connection_url}/task/execute",
+                    json={
+                        "task": payload.goal,
+                        "agent_id": agent_id,
+                        "context": merged_context,
+                        "available_tools": agent.tools or [],
+                    },
+                    headers={"x-user-id": user_id or ""},
+                )
+            elapsed = int((_time.time() - t0) * 1000)
+
+            if resp.status_code < 400:
+                data = resp.json()
+                agent_session.status = "completed"
+                agent_session.loop_count = 1
+                agent_session.total_tokens_used = len(str(data.get("output", ""))) // 4
+                # Store output in first step
+                from .models import AgentStep
+                step = AgentStep(
+                    session_id=agent_session.id,
+                    step_number=0,
+                    action="federated_execution",
+                    reasoning=f"Task dispatched to local connector at {connection_url}",
+                    output_data={
+                        "output": data.get("output", ""),
+                        "tools_used": data.get("tools_used", []),
+                        "duration_ms": elapsed,
+                        "federated": True,
+                    },
+                    status="completed",
+                    duration_ms=elapsed,
+                )
+                session.add(step)
+                await session.commit()
+                logger.info(f"[FEDERATION] Task completed via {connection_url} in {elapsed}ms for agent {agent_id}")
+            else:
+                agent_session.status = "failed"
+                agent_session.error = f"Connector returned {resp.status_code}: {resp.text[:200]}"
+                await session.commit()
+        except httpx.ConnectError:
+            agent_session.status = "failed"
+            agent_session.error = f"Cannot reach local OpenClaw connector at {connection_url}. Make sure it's running."
+            await session.commit()
+            logger.warning(f"[FEDERATION] ConnectError for agent {agent_id} at {connection_url}")
+        except Exception as e:
+            agent_session.status = "failed"
+            agent_session.error = f"Federated dispatch error: {str(e)}"
+            await session.commit()
+            logger.error(f"[FEDERATION] Dispatch error for agent {agent_id}: {e}")
+
+        return SessionResponse(
+            id=str(agent_session.id), agent_id=str(agent_session.agent_id),
+            status=agent_session.status, current_goal=agent_session.current_goal,
+            loop_count=agent_session.loop_count, total_tokens_used=agent_session.total_tokens_used,
+        )
+
+    # ── Cloud agent: run through server-side executor ──
     # Create session
     agent_session = await agent_executor.start_session(
         agent=agent,
