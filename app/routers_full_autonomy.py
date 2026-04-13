@@ -42,11 +42,11 @@ class SetGoalRequest(BaseModel):
 # === DEPENDENCIES ===
 
 async def get_system() -> FullAutonomySystem:
-    return await get_full_autonomy_system()
+    return get_full_autonomy_system()
 
 
 async def get_brains() -> BrainManager:
-    return await get_brain_manager()
+    return get_brain_manager()
 
 
 async def get_queue() -> AutonomousTaskQueue:

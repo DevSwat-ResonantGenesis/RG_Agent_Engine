@@ -108,7 +108,77 @@ async def execute_task(
     except Exception:
         pass
 
-    # Route through real executor session
+    # Federated agent dispatch: send task to the user's local OpenClaw connector
+    if agent and getattr(agent, "agent_source", None) == "federated":
+        config = agent.openclaw_config or {}
+        connection_url = config.get("connection_url", "").rstrip("/")
+        if not connection_url:
+            return {
+                "task_id": agent_id,
+                "success": False,
+                "output": None,
+                "tools_used": [],
+                "duration_ms": 0,
+                "error": "Federated agent has no connection_url. Start your local OpenClaw connector first.",
+            }
+        import time as _time
+        t0 = _time.time()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{connection_url}/task/execute",
+                    json={
+                        "task": request.task,
+                        "agent_id": agent_id,
+                        "context": merged_context,
+                        "available_tools": effective_available_tools or [],
+                    },
+                    headers={"x-user-id": user_id or ""},
+                )
+            elapsed = int((_time.time() - t0) * 1000)
+            if resp.status_code < 400:
+                data = resp.json()
+                return {
+                    "task_id": data.get("task_id", agent_id),
+                    "success": data.get("success", True),
+                    "output": data.get("output", str(data)[:1000]),
+                    "tools_used": data.get("tools_used", []),
+                    "duration_ms": elapsed,
+                    "error": data.get("error"),
+                    "federated": True,
+                }
+            else:
+                return {
+                    "task_id": agent_id,
+                    "success": False,
+                    "output": None,
+                    "tools_used": [],
+                    "duration_ms": elapsed,
+                    "error": f"Federated agent returned {resp.status_code}: {resp.text[:200]}",
+                    "federated": True,
+                }
+        except httpx.ConnectError:
+            return {
+                "task_id": agent_id,
+                "success": False,
+                "output": None,
+                "tools_used": [],
+                "duration_ms": 0,
+                "error": "Cannot reach local OpenClaw connector. Make sure it's running at " + connection_url,
+                "federated": True,
+            }
+        except Exception as e:
+            return {
+                "task_id": agent_id,
+                "success": False,
+                "output": None,
+                "tools_used": [],
+                "duration_ms": int((_time.time() - t0) * 1000),
+                "error": f"Federated dispatch failed: {str(e)}",
+                "federated": True,
+            }
+
+    # Cloud agent: route through real executor session
     from .executor import agent_executor as real_executor
     try:
         session_result = await real_executor.run_session(

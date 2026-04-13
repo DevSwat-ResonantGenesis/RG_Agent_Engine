@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 POLL_INTERVAL = int(os.getenv("SCHEDULER_POLL_INTERVAL", "60"))  # seconds
-MAX_CONCURRENT_SCHEDULED = int(os.getenv("SCHEDULER_MAX_CONCURRENT", "3"))
+MAX_CONCURRENT_SCHEDULED = int(os.getenv("SCHEDULER_MAX_CONCURRENT", "2"))
 
 _running = False
 _task: Optional[asyncio.Task] = None
+_semaphore: Optional[asyncio.Semaphore] = None
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +188,20 @@ async def _poll_once() -> int:
 async def _fire_session(*, agent_id: str, goal: str, context: dict,
                         user_id: Optional[str], source: str) -> None:
     """Create a session row and run the agent loop."""
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCHEDULED)
+
+    if _semaphore.locked():
+        logger.warning(f"[SCHEDULER] Skipping {source}: max concurrent ({MAX_CONCURRENT_SCHEDULED}) reached")
+        return
+
+    async with _semaphore:
+        await _fire_session_inner(agent_id=agent_id, goal=goal, context=context, user_id=user_id, source=source)
+
+
+async def _fire_session_inner(*, agent_id: str, goal: str, context: dict,
+                               user_id: Optional[str], source: str) -> None:
     from uuid import UUID as PyUUID
 
     try:
