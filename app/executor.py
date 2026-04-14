@@ -2519,6 +2519,9 @@ Respond in JSON:
             
             # === EXECUTION GATE: Dual-mode autonomy enforcement ===
             agent_mode = getattr(agent, 'mode', None) or 'governed'
+            # UNBOUNDED: completely bypass all approval gates
+            if agent_mode == 'unbounded':
+                requires_approval = False
             if EXECUTION_GATE_AVAILABLE and get_execution_gate:
                 from uuid import uuid4
                 gate = get_execution_gate()
