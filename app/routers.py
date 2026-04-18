@@ -404,6 +404,8 @@ class AgentResponse(BaseModel):
     agent_public_hash: Optional[str] = None
     agent_version_hash: Optional[str] = None
     dsid: Optional[str] = None
+    agent_source: Optional[str] = "cloud"
+    openclaw_config: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -1596,6 +1598,8 @@ async def create_agent(
             agent_public_hash=agent.agent_public_hash,
             agent_version_hash=agent.agent_version_hash,
             dsid=(agent.safety_config or {}).get("dsid"),
+            agent_source=getattr(agent, 'agent_source', None) or 'cloud',
+            openclaw_config=getattr(agent, 'openclaw_config', None),
         )
     except HTTPException:
         # Re-raise HTTPException without wrapping (e.g., 429 agent limit)
@@ -1688,6 +1692,8 @@ async def list_agents(
                     agent_public_hash=a.agent_public_hash,
                     agent_version_hash=a.agent_version_hash,
                     dsid=(a.safety_config or {}).get("dsid"),
+                    agent_source=getattr(a, 'agent_source', None) or 'cloud',
+                    openclaw_config=getattr(a, 'openclaw_config', None),
                     created_at=a.created_at.isoformat() if a.created_at else None,
                     updated_at=a.updated_at.isoformat() if a.updated_at else None,
                 )
@@ -1883,6 +1889,7 @@ async def instantiate_agent_template(
         agent_version_hash=agent.agent_version_hash,
         dsid=(agent.safety_config or {}).get("dsid"),
         agent_source=getattr(agent, 'agent_source', None) or 'cloud',
+        openclaw_config=getattr(agent, 'openclaw_config', None),
     )
 
 
@@ -2987,6 +2994,7 @@ async def get_agent(
         agent_version_hash=agent.agent_version_hash,
         dsid=(agent.safety_config or {}).get("dsid"),
         agent_source=getattr(agent, 'agent_source', None) or 'cloud',
+        openclaw_config=getattr(agent, 'openclaw_config', None),
     )
 
 
