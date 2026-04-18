@@ -3344,6 +3344,42 @@ async def start_session(
 
     # ── Federated agent dispatch: queue task for local connector to poll ──
     if getattr(agent, "agent_source", None) == "federated":
+        # Pre-flight: check if the OpenClaw connector is actually online
+        oc_config = getattr(agent, "openclaw_config", None) or {}
+        last_hb = oc_config.get("last_heartbeat")
+        connector_online = False
+        if last_hb:
+            try:
+                from datetime import datetime, timezone, timedelta
+                hb_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                if hb_time.tzinfo is None:
+                    hb_time = hb_time.replace(tzinfo=timezone.utc)
+                connector_online = (datetime.now(timezone.utc) - hb_time) < timedelta(minutes=2)
+            except Exception:
+                pass
+
+        if not connector_online:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "agent_offline",
+                    "detail": (
+                        f"The local-machine agent '{agent.name}' is not connected. "
+                        "The OpenClaw connector on your computer must be running to execute this agent."
+                    ),
+                    "instructions": [
+                        "1. Open the OpenClaw extension on your local machine",
+                        "2. Make sure the extension is logged in with the same account",
+                        "3. Check that the agent is registered and showing 'Connected'",
+                        "4. If the issue persists, restart the OpenClaw extension",
+                    ],
+                    "agent_name": agent.name,
+                    "agent_id": str(agent.id),
+                    "last_heartbeat": last_hb,
+                    "connection_status": oc_config.get("status", "unknown"),
+                },
+            )
+
         # Create session record so the UI can track it
         agent_session = await agent_executor.start_session(
             agent=agent,
