@@ -50,7 +50,7 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-MAX_CONCURRENT_AGENT_RUNS = _int_env("AGENT_ENGINE_MAX_CONCURRENT_RUNS", 3)
+MAX_CONCURRENT_AGENT_RUNS = _int_env("AGENT_ENGINE_MAX_CONCURRENT_RUNS", 10)
 _agent_run_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENT_RUNS)
 
 
@@ -1939,28 +1939,69 @@ async def execute_tool_direct(request: Request):
     )
 
     executor = AgentExecutor()
+    session_id = body.get("session_id", "")
+    run_async = body.get("async", False)
 
-    # Build a lightweight session-like object for tools that need user context
-    _TOOL_MGMT = {"create_tool", "list_tools", "delete_tool", "update_tool",
-                   "auto_build_tool", "check_tool_exists"}
+    # Check if Celery is available and tool is heavy → offload to background
+    from .tasks import HEAVY_TOOLS
+    _celery_available = False
+    if tool_name in HEAVY_TOOLS and run_async:
+        try:
+            from .tasks import execute_tool_background
+            task = execute_tool_background.apply_async(
+                kwargs={
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                },
+                queue="agents",
+            )
+            _celery_available = True
+            logger.info(f"[TOOLS] Offloaded {tool_name} to Celery (task={task.id})")
+            return {
+                "success": True,
+                "async": True,
+                "task_id": task.id,
+                "tool_name": tool_name,
+                "status": "processing",
+                "poll_url": f"/tools/result/{task.id}",
+            }
+        except Exception as e:
+            logger.warning(f"[TOOLS] Celery unavailable, executing inline: {e}")
+
+    # Inline execution (light tools, or Celery unavailable)
+    # Load real session from DB when session_id is provided (federated agents)
+    session_obj = None
+    if session_id:
+        try:
+            from .models import AgentSession
+            from .db import async_session as db_session_factory
+            from uuid import UUID as PyUUID
+            async with db_session_factory() as db_sess:
+                from sqlalchemy import select
+                result_q = await db_sess.execute(
+                    select(AgentSession).where(AgentSession.id == PyUUID(session_id))
+                )
+                session_obj = result_q.scalar_one_or_none()
+        except Exception as e:
+            logger.warning(f"[TOOLS] Failed to load session {session_id}: {e}")
+
+    if not session_obj:
+        class _Ctx:
+            pass
+        session_obj = _Ctx()
+        session_obj.user_id = user_id
+        session_obj.context = {
+            "org_id": request.headers.get("x-org-id", ""),
+            "user_role": request.headers.get("x-user-role", "user"),
+        }
 
     # Handler map
     handler = executor._handler_map.get(tool_name)
     if handler:
         try:
-            if tool_name in _TOOL_MGMT:
-                # Tool management needs user context — build a mock session
-                class _Ctx:
-                    pass
-                mock = _Ctx()
-                mock.user_id = user_id
-                mock.context = {
-                    "org_id": request.headers.get("x-org-id", ""),
-                    "user_role": request.headers.get("x-user-role", "user"),
-                }
-                result = await handler(tool_input, session=mock)
-            else:
-                result = await handler(tool_input, session=None)
+            result = await handler(tool_input, session=session_obj)
             return {"success": True, "tool_name": tool_name, "result": result}
         except Exception as e:
             return {"success": False, "tool_name": tool_name, "error": str(e)}
@@ -1985,6 +2026,39 @@ async def execute_tool_direct(request: Request):
         pass
 
     raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
+
+
+@router.get("/tools/result/{task_id}")
+async def get_tool_result(task_id: str):
+    """Poll for async tool execution result from Celery."""
+    try:
+        from .celery_app import celery_app
+        result = celery_app.AsyncResult(task_id)
+
+        if not result.ready():
+            return {
+                "task_id": task_id,
+                "status": "processing",
+                "ready": False,
+            }
+
+        if result.successful():
+            return {
+                "task_id": task_id,
+                "status": "completed",
+                "ready": True,
+                **result.result,
+            }
+        else:
+            return {
+                "task_id": task_id,
+                "status": "failed",
+                "ready": True,
+                "success": False,
+                "error": str(result.result),
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check task: {e}")
 
 
 @router.get("/tools/list")
@@ -2265,12 +2339,53 @@ async def federation_poll_tasks(
     """Poll for pending tasks assigned to the authenticated user's federated agents.
     The local OpenClaw connector calls this periodically (every 3-5s).
     Returns the oldest pending task and marks it as 'dispatched'.
+    Recovers stale dispatched tasks (connector crashed) with retry limit.
     """
     user_id = request.headers.get("x-user-id")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID required")
 
-    from .models import FederatedTask
+    from .models import FederatedTask, AgentSession
+    from datetime import datetime, timezone, timedelta
+
+    MAX_RETRIES = 3
+    STALE_TIMEOUT = timedelta(minutes=3)
+    now = datetime.now(timezone.utc)
+
+    # Handle stale dispatched tasks — connector died mid-execution
+    stale_result = await db.execute(
+        select(FederatedTask).where(
+            FederatedTask.user_id == user_id,
+            FederatedTask.status == "dispatched",
+        )
+    )
+    for stale_task in stale_result.scalars().all():
+        dispatched = stale_task.dispatched_at or stale_task.created_at
+        if (now - dispatched) < STALE_TIMEOUT:
+            continue  # Still within timeout, connector may be working
+
+        if (stale_task.retry_count or 0) >= MAX_RETRIES:
+            # Max retries exceeded — permanently fail
+            stale_task.status = "failed"
+            stale_task.result = {"error": f"Task failed after {MAX_RETRIES} dispatch attempts (connector timeout)"}
+            # Also fail the associated session
+            sess_result = await db.execute(
+                select(AgentSession).where(AgentSession.id == stale_task.session_id)
+            )
+            sess_obj = sess_result.scalar_one_or_none()
+            if sess_obj and sess_obj.status in ("queued", "initializing", "running"):
+                sess_obj.status = "failed"
+                sess_obj.error_message = f"Federated execution failed after {MAX_RETRIES} attempts — connector timed out"
+            logger.warning(f"[FEDERATION] Task {stale_task.id} permanently failed after {MAX_RETRIES} retries")
+        else:
+            # Re-queue for retry
+            stale_task.status = "pending"
+            stale_task.retry_count = (stale_task.retry_count or 0) + 1
+            stale_task.dispatched_at = None
+            logger.info(f"[FEDERATION] Task {stale_task.id} re-queued (retry {stale_task.retry_count}/{MAX_RETRIES})")
+    await db.commit()
+
+    # Pick up oldest pending task
     result = await db.execute(
         select(FederatedTask)
         .where(
@@ -2285,6 +2400,7 @@ async def federation_poll_tasks(
         return {"task": None}
 
     task.status = "dispatched"
+    task.dispatched_at = now
     await db.commit()
 
     return {
@@ -3048,7 +3164,25 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
         logger.error("Invalid UUIDs for background run")
         return
 
-    async with _agent_run_semaphore:
+    try:
+        await asyncio.wait_for(_agent_run_semaphore.acquire(), timeout=30)
+    except asyncio.TimeoutError:
+        logger.error("Agent session %s could not acquire semaphore (all slots busy)", session_id)
+        try:
+            async with async_session() as db_session:
+                result = await db_session.execute(
+                    select(AgentSession).where(AgentSession.id == PyUUID(session_id))
+                )
+                agent_session = result.scalar_one_or_none()
+                if agent_session and agent_session.status in ("initializing", "queued"):
+                    agent_session.status = "failed"
+                    agent_session.error_message = "Server busy — all agent slots occupied. Please retry."
+                    await db_session.commit()
+        except Exception:
+            pass
+        return
+
+    try:
         try:
             await asyncio.wait_for(
                 _run_agent_session_background_inner(session_id=str(session_uuid), agent_id=str(agent_uuid)),
@@ -3083,6 +3217,8 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
                         await db_session.commit()
             except Exception:
                 return
+    finally:
+        _agent_run_semaphore.release()
 
 
 async def _run_agent_session_background_inner(*, session_id: str, agent_id: str) -> None:
