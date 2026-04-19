@@ -2824,7 +2824,7 @@ Respond in JSON:
                 "provider": preferred,
                 "model": agent.model or None,
                 "temperature": agent.temperature or 0.7,
-                "max_tokens": agent.max_tokens or 2048,
+                "max_tokens": agent.max_tokens or 16384,
                 "response_format": {"type": "json_object"},
             },
             user_keys=user_keys,

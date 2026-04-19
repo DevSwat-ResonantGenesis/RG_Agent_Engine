@@ -379,7 +379,7 @@ class AgentCreate(BaseModel):
     provider: Optional[str] = None  # e.g. openai, anthropic, groq, google, local
     model: str = "gpt-4-turbo-preview"
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     tool_mode: Optional[str] = "smart"  # smart = all tools auto, manual = only selected tools
     tools: Optional[List[str]] = None
     mode: Optional[str] = "governed"  # governed or unbounded

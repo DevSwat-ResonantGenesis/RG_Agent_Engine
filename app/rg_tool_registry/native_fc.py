@@ -135,7 +135,7 @@ class NativeFCClient:
         tools: Optional[List[ToolDef]] = None,
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         max_tools: Optional[int] = None,
     ) -> LLMResponse:
         """
@@ -515,7 +515,7 @@ class AgenticLoop:
         tools: List[ToolDef],
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         user_id: str = "",
         session_id: str = "",
         max_tools: Optional[int] = None,

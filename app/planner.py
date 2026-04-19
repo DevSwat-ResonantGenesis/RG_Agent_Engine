@@ -70,7 +70,7 @@ Create a revised plan that addresses the issue while still achieving the goal.
 
 Respond in the same JSON format as before."""
 
-    async def _call_llm_json(self, prompt: str, max_tokens: int = 2048) -> Optional[str]:
+    async def _call_llm_json(self, prompt: str, max_tokens: int = 8192) -> Optional[str]:
         """Call LLM with JSON output via HTTP LLM client."""
         from .executor import _llm_client
 
