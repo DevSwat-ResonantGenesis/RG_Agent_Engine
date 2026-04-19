@@ -358,12 +358,19 @@ Respond in JSON:
         in the session context when the session was created.  No JWT is
         forwarded — internal services trust x-user-* headers.
         """
-        from platform_tools.auth import AuthContext
+        from dataclasses import dataclass, field
+        @dataclass
+        class _AuthCtx:
+            user_id: str = ""
+            org_id: str = ""
+            user_role: str = "user"
+            is_superuser: bool = False
+            unlimited_credits: bool = False
         user_id = str(session.user_id) if session and session.user_id else "agent-system"
         ctx = session.context if session else {}
-        return AuthContext(
+        return _AuthCtx(
             user_id=user_id,
-            org_id=ctx.get("org_id"),
+            org_id=ctx.get("org_id", ""),
             user_role=ctx.get("user_role", "user"),
             is_superuser=ctx.get("is_superuser", False),
             unlimited_credits=ctx.get("unlimited_credits", False),
@@ -950,42 +957,20 @@ Respond in JSON:
     # ================================================================
 
     async def _tool_create_rabbit_post(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Create a post on a Rabbit community."""
-        from platform_tools.rabbit import tool_create_rabbit_post
-        return await tool_create_rabbit_post(
-            title=(tool_input or {}).get("title", ""),
-            body=(tool_input or {}).get("body", ""),
-            community_slug=(tool_input or {}).get("community_slug"),
-            auth=self._build_auth_context(session),
-        )
+        """Create a post on a Rabbit community — Rabbit services currently disabled."""
+        return {"error": "Rabbit community services are currently disabled"}
 
     async def _tool_list_rabbit_communities(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """List available Rabbit communities."""
-        from platform_tools.rabbit import tool_list_rabbit_communities
-        return await tool_list_rabbit_communities(
-            auth=self._build_auth_context(session),
-        )
+        """List available Rabbit communities — Rabbit services currently disabled."""
+        return {"error": "Rabbit community services are currently disabled"}
 
     async def _tool_create_rabbit_community(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Create a new Rabbit community."""
-        from platform_tools.rabbit import tool_create_rabbit_community
-        return await tool_create_rabbit_community(
-            slug=(tool_input or {}).get("slug", ""),
-            name=(tool_input or {}).get("name", ""),
-            description=(tool_input or {}).get("description", ""),
-            auth=self._build_auth_context(session),
-        )
+        """Create a new Rabbit community — Rabbit services currently disabled."""
+        return {"error": "Rabbit community services are currently disabled"}
 
     async def _tool_http_request(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Make an authenticated HTTP request to an internal platform API."""
-        from platform_tools.http_api import tool_http_request
-        return await tool_http_request(
-            url=(tool_input or {}).get("url", ""),
-            method=(tool_input or {}).get("method", "GET"),
-            body=(tool_input or {}).get("body"),
-            extra_headers=(tool_input or {}).get("headers"),
-            auth=self._build_auth_context(session),
-        )
+        """Make an HTTP request — TODO: reimplement via unified tool registry."""
+        return {"error": "HTTP request tool not yet migrated to unified registry"}
 
     # ================================================================
     # GMAIL + SLACK TOOLS (Phase 2.5, backed by shared/tools/)
