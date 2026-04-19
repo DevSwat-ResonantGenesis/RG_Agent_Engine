@@ -80,6 +80,41 @@ class FullAutonomySystem:
         
     def get_stats(self) -> Dict[str, Any]:
         return {"total_configs": len(self.configs), "total_actions": len(self.action_log)}
+
+    async def get_full_stats(self) -> Dict[str, Any]:
+        """Aggregate stats from all autonomous subsystems."""
+        stats: Dict[str, Any] = {
+            "system": self.get_status(),
+        }
+        # Network stats
+        try:
+            from .agent_network import get_agent_network
+            network = await get_agent_network()
+            stats["network"] = network.get_stats()
+        except Exception:
+            stats["network"] = None
+        # Queue stats
+        try:
+            from .autonomous_queue import get_autonomous_queue
+            queue = await get_autonomous_queue()
+            stats["queue"] = queue.get_stats()
+        except Exception:
+            stats["queue"] = None
+        # Brains
+        try:
+            from .agent_brain import get_brain_manager
+            brain_mgr = get_brain_manager()
+            stats["brains"] = brain_mgr.get_all_statuses()
+        except Exception:
+            stats["brains"] = []
+        # Watchdog
+        try:
+            from .system_watchdog import get_watchdog
+            watchdog = await get_watchdog()
+            stats["watchdog"] = watchdog.get_status()
+        except Exception:
+            stats["watchdog"] = None
+        return stats
     
     async def create_autonomous_agent(
         self,

@@ -24,9 +24,9 @@ from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 
 from .celery_app import celery_app
-from .db import async_session_maker
+from .db import async_session
 from .models import AgentDefinition, AgentSession, AgentSchedule
-from .executor import agent_executor
+from .executor import AgentExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def execute_agent_session(
     logger.info(f"Starting background agent session: {session_id}")
     
     async def _execute():
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             # Load agent and session
             agent = await db_session.get(AgentDefinition, UUID(agent_id))
             if not agent:
@@ -134,7 +134,7 @@ def execute_agent_step(
     logger.info(f"Executing step {step_number} for session: {session_id}")
     
     async def _execute_step():
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             session = await db_session.get(AgentSession, UUID(session_id))
             if not session:
                 return {"status": "error", "error": "Session not found"}
@@ -167,7 +167,7 @@ def scheduled_agent_trigger(schedule_id: str) -> Dict[str, Any]:
     logger.info(f"Processing scheduled trigger: {schedule_id}")
     
     async def _trigger():
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             schedule = await db_session.get(AgentSchedule, UUID(schedule_id))
             if not schedule:
                 return {"status": "error", "error": "Schedule not found"}
@@ -214,7 +214,7 @@ def process_scheduled_triggers() -> Dict[str, Any]:
     async def _process():
         from sqlalchemy import select
         
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             now = datetime.now(timezone.utc)
             
             # Find due schedules
@@ -257,7 +257,7 @@ def check_agent_health() -> Dict[str, Any]:
     async def _check():
         from sqlalchemy import select
         
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             now = datetime.now(timezone.utc)
             stale_threshold = 300  # 5 minutes
             
@@ -318,7 +318,7 @@ def cleanup_stale_sessions() -> Dict[str, Any]:
     async def _cleanup():
         from sqlalchemy import select
         
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             now = datetime.now(timezone.utc)
             
             # Find stale sessions older than 1 hour + lingering waiting_approval
@@ -357,7 +357,7 @@ def resume_agent_session(self, session_id: str) -> Dict[str, Any]:
     logger.info(f"Resuming agent session: {session_id}")
     
     async def _resume():
-        async with async_session_maker() as db_session:
+        async with async_session() as db_session:
             session = await db_session.get(AgentSession, UUID(session_id))
             if not session:
                 return {"status": "error", "error": "Session not found"}
@@ -421,6 +421,71 @@ def _calculate_next_run(cron_expression: Optional[str], interval_seconds: Option
     # Default: 1 hour
     from datetime import timedelta
     return now + timedelta(hours=1)
+
+
+# ─── Heavy Tool Execution Task ────────────────────────────────────────
+# Offloads heavy tools (web_search, fetch_url, browser_automation, etc.)
+# so the main API workers stay responsive.
+
+HEAVY_TOOLS = {
+    "web_search", "fetch_url", "browser_automation", "deep_research",
+    "code_execution", "execute_code", "pdf_parse", "spreadsheet",
+    "google_calendar", "google_drive", "database_query",
+    "image_generation", "generate_image", "generate_audio", "generate_video",
+}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.execute_tool_background",
+    max_retries=1,
+    soft_time_limit=120,
+    time_limit=180,
+)
+def execute_tool_background(
+    self,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    user_id: str,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute a heavy tool in a background Celery worker."""
+    logger.info(f"[CELERY] Executing heavy tool: {tool_name} (user={user_id})")
+
+    async def _run():
+        executor = AgentExecutor()
+        handler = executor._handler_map.get(tool_name)
+        if not handler:
+            return {"success": False, "error": f"Tool '{tool_name}' not found"}
+
+        # Build session context
+        session_obj = None
+        if session_id:
+            try:
+                from uuid import UUID as PyUUID
+                async with async_session() as db_sess:
+                    from sqlalchemy import select
+                    result_q = await db_sess.execute(
+                        select(AgentSession).where(AgentSession.id == PyUUID(session_id))
+                    )
+                    session_obj = result_q.scalar_one_or_none()
+            except Exception as e:
+                logger.warning(f"[CELERY] Failed to load session {session_id}: {e}")
+
+        if not session_obj:
+            class _Ctx:
+                pass
+            session_obj = _Ctx()
+            session_obj.user_id = user_id
+            session_obj.context = {}
+
+        try:
+            result = await handler(tool_input, session=session_obj)
+            return {"success": True, "tool_name": tool_name, "result": result}
+        except Exception as e:
+            return {"success": False, "tool_name": tool_name, "error": str(e)}
+
+    return run_async(_run())
 
 
 # Convenience functions for API

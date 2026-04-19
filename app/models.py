@@ -147,6 +147,8 @@ class FederatedTask(Base):
     tools = Column(JSONB, nullable=True)
     status = Column(String(32), default="pending", nullable=False, index=True)  # pending, dispatched, completed, failed
     result = Column(JSONB, nullable=True)
+    dispatched_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
