@@ -12,7 +12,7 @@ PROBLEM:
 
 SOLUTION:
   Use native function calling (tools parameter) — the same approach that already
-  works in routers_agentic_chat.py. The LLM returns structured tool_calls with
+  works with native function calling. The LLM returns structured tool_calls with
   validated function names and typed arguments.
 
 This module provides:

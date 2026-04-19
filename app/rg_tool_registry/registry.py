@@ -3,8 +3,7 @@ Unified Tool Registry
 =====================
 
 ONE canonical ToolDef format that replaces:
-  - TOOL_DEFS dict       (routers_agentic_chat.py)
-  - GUEST_TOOLS dict     (routers_public_chat.py)
+  - TOOL_DEFS dict       (custom_tools.py)
   - executor.tool_handlers dict (executor.py)
   - ToolDef[] TypeScript  (toolDefinitions.ts)
 
@@ -361,7 +360,7 @@ class ToolRegistry:
         access: Set[ToolAccess] = None,
     ) -> "ToolRegistry":
         """
-        Import from the old TOOL_DEFS dict format used in routers_agentic_chat.py.
+        Import from the old TOOL_DEFS dict format.
 
         TOOL_DEFS = {
             "web_search": {
@@ -409,7 +408,7 @@ class ToolRegistry:
         cls,
         guest_tools: Dict[str, Dict[str, Any]],
     ) -> "ToolRegistry":
-        """Import from GUEST_TOOLS dict format (routers_public_chat.py)."""
+        """Import from GUEST_TOOLS dict format."""
         return cls.from_tool_defs_dict(guest_tools, access={ToolAccess.GUEST})
 
     def merge(self, other: "ToolRegistry") -> None:

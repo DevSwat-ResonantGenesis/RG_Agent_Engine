@@ -3219,37 +3219,37 @@ Respond in JSON:
         return await self._tool_platform_api({"service": "agent_engine", "endpoint": path, "method": method, "body": tool_input or {}}, session=session)
 
     # ------------------------------------------------------------------
-    # Dynamic Tool Management — delegates to routers_agentic_chat handlers
+    # Dynamic Tool Management — delegates to custom_tools module
     # These let Agent Engine sessions create/manage tools
     # ------------------------------------------------------------------
 
     async def _tool_create_tool(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_create_tool
+        from .custom_tools import _custom_create_tool
         ctx = self._build_tool_ctx(session)
         return await _custom_create_tool(tool_input, ctx)
 
     async def _tool_list_tools(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_list_tools
+        from .custom_tools import _custom_list_tools
         ctx = self._build_tool_ctx(session)
         return await _custom_list_tools(tool_input, ctx)
 
     async def _tool_delete_tool(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_delete_tool
+        from .custom_tools import _custom_delete_tool
         ctx = self._build_tool_ctx(session)
         return await _custom_delete_tool(tool_input, ctx)
 
     async def _tool_update_tool(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_update_tool
+        from .custom_tools import _custom_update_tool
         ctx = self._build_tool_ctx(session)
         return await _custom_update_tool(tool_input, ctx)
 
     async def _tool_auto_build_tool(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_auto_build_tool
+        from .custom_tools import _custom_auto_build_tool
         ctx = self._build_tool_ctx(session)
         return await _custom_auto_build_tool(tool_input, ctx)
 
     async def _tool_check_tool_exists(self, tool_input: dict, session=None):
-        from .routers_agentic_chat import _custom_check_tool_exists
+        from .custom_tools import _custom_check_tool_exists
         ctx = self._build_tool_ctx(session)
         return await _custom_check_tool_exists(tool_input, ctx)
 

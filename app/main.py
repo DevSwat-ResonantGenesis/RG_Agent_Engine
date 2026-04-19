@@ -57,8 +57,6 @@ from .routers_ssh import router as ssh_router
 from .routers_subdir import project_builder_router
 from .webhooks import router as webhooks_router
 from .routers_discord import router as discord_router
-# AGENTIC CHAT REMOVED — now standalone service at RG_Registered_Users_Agentic_Chat
-# PUBLIC CHAT REMOVED — now standalone service at RG_Public/Guest_Agentic_Chat
 
 # Advanced intelligence routers (restored from RG_core)
 try:
@@ -102,8 +100,6 @@ app.include_router(ssh_router)
 app.include_router(project_builder_router)
 app.include_router(webhooks_router)
 app.include_router(discord_router)
-# agentic_chat_router REMOVED — standalone service at RG_Registered_Users_Agentic_Chat
-# public_chat_router REMOVED — standalone service at RG_Public/Guest_Agentic_Chat
 
 # Autonomy & goal management routers
 # - Autonomy endpoints are mounted at root (gateway proxies /autonomy/*)

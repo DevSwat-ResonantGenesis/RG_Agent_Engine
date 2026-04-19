@@ -2024,7 +2024,7 @@ async def execute_tool_direct(request: Request):
 
     # Try dynamic custom tools (user-created or shared)
     try:
-        from .routers_agentic_chat import _execute_dynamic_custom_tool
+        from .custom_tools import _execute_dynamic_custom_tool
         ctx = {"user_id": user_id}
         result = await _execute_dynamic_custom_tool(tool_name, tool_input or {}, ctx)
         if not result.get("error", "").startswith("Custom tool"):
