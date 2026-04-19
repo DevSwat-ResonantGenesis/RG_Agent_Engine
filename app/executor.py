@@ -59,64 +59,55 @@ except ImportError:
 import logging
 logger = logging.getLogger(__name__)
 
-# ── LLM Client via unified HTTP service (no rg_llm dependency) ──
+# ── LLM Client via UnifiedLLMClient (direct provider calls, no HTTP hop) ──
+from rg_llm import UnifiedLLMClient, LLMRequest as _RgLLMRequest
+
+# Keep LLM_SERVICE_URL for the /providers proxy endpoint in routers.py
 LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm_service:8000").rstrip("/")
 
 
-class _HTTPLLMResponse:
-    """Lightweight response wrapper matching the rg_llm interface."""
-    def __init__(self, content: str, provider: str, model: str, usage: dict, was_fallback: bool = False, fallback_chain: list = None):
-        self.content = content
-        self.provider = provider
-        self.model = model
-        self.usage = usage
-        self.was_fallback = was_fallback
-        self.fallback_chain = fallback_chain or []
+class _LLMClientAdapter:
+    """Adapter around UnifiedLLMClient that accepts dict or LLMRequest.
 
+    Provides the same .complete(request, user_keys) interface so all callers
+    (executor, planner, agentic_chat) work without changes.
+    """
 
-class _HTTPLLMClient:
-    """Calls the unified LLM service via HTTP — drop-in replacement for rg_llm."""
-
-    def __init__(self, fallback_order=None):
-        self.fallback_order = fallback_order or ["groq", "openai", "anthropic", "google"]
+    def __init__(self):
+        self._client = UnifiedLLMClient()
 
     async def complete(self, request, user_keys=None):
-        payload = {
-            "messages": request.get("messages") if isinstance(request, dict) else getattr(request, "messages", []),
-            "stream": False,
-        }
-        # Extract fields from request (dict or object)
-        for field in ("provider", "model", "temperature", "max_tokens", "response_format", "tools"):
-            val = request.get(field) if isinstance(request, dict) else getattr(request, field, None)
-            if val is not None:
-                payload[field] = val
-        if user_keys:
-            payload["user_api_keys"] = user_keys
+        # Extract fields from dict or object
+        def _get(key, default=None):
+            if isinstance(request, dict):
+                return request.get(key, default)
+            return getattr(request, key, default)
 
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                resp = await client.post(f"{LLM_SERVICE_URL}/llm/chat/completions", json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    choice = (data.get("choices") or [{}])[0]
-                    msg = choice.get("message", {})
-                    return _HTTPLLMResponse(
-                        content=msg.get("content", ""),
-                        provider=data.get("provider", "unknown"),
-                        model=data.get("model", ""),
-                        usage=data.get("usage", {}),
-                    )
-                else:
-                    raise RuntimeError(f"LLM service returned {resp.status_code}: {resp.text[:200]}")
-        except httpx.TimeoutException:
-            raise RuntimeError("LLM service timed out")
-        except httpx.ConnectError:
-            raise RuntimeError("LLM service unreachable")
+        messages = _get("messages", [])
+        provider = _get("provider")
+        model = _get("model")
+        temperature = _get("temperature", 0.7)
+        max_tokens = _get("max_tokens", 16384)
+        tools = _get("tools")
+        response_format = _get("response_format")
+
+        req = _RgLLMRequest(
+            messages=messages,
+            provider=provider,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            response_format=response_format,
+        )
+
+        response = await self._client.complete(req, user_keys=user_keys)
+
+        # Return an object with .content, .provider, .model, .usage, .was_fallback, .fallback_chain
+        return response
 
 
-_llm_client = _HTTPLLMClient(
-    fallback_order=["groq", "openai", "anthropic", "google"],
-)
+_llm_client = _LLMClientAdapter()
 
 # Auth service config (for BYOK key fetching)
 AUTH_SERVICE_URL = os.getenv("AUTH_URL", "http://auth_service:8000")

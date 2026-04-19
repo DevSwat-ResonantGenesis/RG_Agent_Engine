@@ -390,93 +390,32 @@ Begin solving this task step by step."""
         user_api_keys: Dict[str, str] = None,
         preferred_provider: str = None,
     ) -> Optional[str]:
-        """Call the chat_service's unified multi-provider system with automatic fallback.
+        """Call LLM via UnifiedLLMClient with automatic multi-provider fallback.
         
-        Uses the same provider system as Resonant Chat:
-        - Supports: Groq, Gemini, Claude, ChatGPT
-        - Automatic fallback chain: Groq → Gemini → Claude → ChatGPT
-        - BYOK (Bring Your Own Key) support
-        
-        Args:
-            messages: Chat messages to send
-            user_id: User ID for credit tracking
-            user_api_keys: User's own API keys (bypasses credit system)
-            preferred_provider: Preferred LLM provider (openai, anthropic, groq, gemini)
+        Supports: Groq, Gemini, Claude, ChatGPT + all providers in UnifiedLLMClient
+        Automatic fallback chain with BYOK (Bring Your Own Key) support.
         """
-        client = await self._get_client()
-        
-        # Extract the last user message as the query
-        user_message = ""
-        context_messages = []
-        for msg in messages:
-            if msg.get("role") == "user":
-                user_message = msg.get("content", "")
-            context_messages.append(msg)
-        
-        # Build request for chat_service's unified provider endpoint
-        request_data = {
-            "message": user_message,
-            "context": context_messages,
-            "preferred_provider": preferred_provider or "groq",
-        }
-        
-        # Add user API keys if available (these bypass credit system)
-        if user_api_keys:
-            request_data["user_api_keys"] = user_api_keys
-        
-        # Add user context headers
-        headers = {"Content-Type": "application/json"}
-        if user_id:
-            headers["x-user-id"] = user_id
-        
-        # Use llm_service agent router (isolated from chat traffic)
+        from .executor import _llm_client
+
         try:
-            response = await client.post(
-                f"{self.llm_service_url}/llm/agents/route-query",
-                json=request_data,
-                headers=headers,
-                timeout=60.0,
+            response = await _llm_client.complete(
+                {
+                    "messages": messages,
+                    "provider": preferred_provider or "groq",
+                    "temperature": 0.3,
+                    "max_tokens": 16384,
+                },
+                user_keys=user_api_keys,
             )
-            if response.status_code == 200:
-                result = response.json()
-                response_text = result.get("response", "")
-                provider_used = result.get("provider", "unknown")
-                logger.info(f"✅ Agent LLM call succeeded via {provider_used}")
-                return response_text
-            logger.warning(
-                "Agent router failed: %s, falling back to basic llm_service",
-                response.status_code,
-            )
+            content = response.content or ""
+            if content:
+                logger.info(f"✅ Agent LLM call succeeded via {response.provider}/{response.model}")
+                return content
+            logger.warning("LLM returned empty content")
+            return None
         except Exception as e:
-            logger.warning(f"Agent router failed: {e}, falling back to basic llm_service")
-        
-        # Fallback to basic llm_service if chat_service fails
-        try:
-            llm_request = {
-                "messages": messages,
-                "temperature": 0.3,
-            }
-            if user_api_keys:
-                llm_request["user_api_keys"] = user_api_keys
-            if preferred_provider:
-                llm_request["provider"] = preferred_provider
-            
-            response = await client.post(
-                f"{self.llm_service_url}/llm/chat/completions",
-                json=llm_request,
-                headers=headers,
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            else:
-                logger.error(f"LLM service fallback failed: {response.status_code}: {response.text}")
-                
-        except Exception as e:
-            logger.error(f"LLM service fallback failed: {e}")
-        
-        return None
+            logger.error(f"LLM call failed: {e}")
+            return None
     
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """Parse LLM response to extract thought, action, and input."""

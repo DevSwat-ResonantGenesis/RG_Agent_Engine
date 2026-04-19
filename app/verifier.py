@@ -16,7 +16,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
 
 from .config import settings
 
@@ -171,20 +170,15 @@ Respond in JSON:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{settings.LLM_SERVICE_URL}/llm/chat/completions",
-                    json={
-                        "messages": [{"role": "user", "content": prompt}],
-                        "model": settings.DEFAULT_MODEL,
-                        "max_tokens": 1024,
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    content = data["choices"][0]["message"]["content"]
+            from .executor import _llm_client
+            response = await _llm_client.complete({
+                "messages": [{"role": "user", "content": prompt}],
+                "model": settings.DEFAULT_MODEL,
+                "max_tokens": 1024,
+                "response_format": {"type": "json_object"},
+            })
+            content = response.content or ""
+            if content:
                     result_data = json.loads(content)
 
                     report = VerificationReport(
@@ -235,27 +229,21 @@ Respond in JSON:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(
-                    f"{settings.LLM_SERVICE_URL}/llm/chat/completions",
-                    json={
-                        "messages": [{"role": "user", "content": prompt}],
-                        "model": settings.DEFAULT_MODEL,
-                        "max_tokens": 512,
-                        "response_format": {"type": "json_object"},
-                    },
+            from .executor import _llm_client
+            resp = await _llm_client.complete({
+                "messages": [{"role": "user", "content": prompt}],
+                "model": settings.DEFAULT_MODEL,
+                "max_tokens": 512,
+                "response_format": {"type": "json_object"},
+            })
+            content = resp.content or ""
+            if content:
+                result = json.loads(content)
+                return (
+                    result.get("has_hallucination", False),
+                    result.get("confidence", 0.5),
+                    result.get("details", ""),
                 )
-
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    result = json.loads(content)
-
-                    return (
-                        result.get("has_hallucination", False),
-                        result.get("confidence", 0.5),
-                        result.get("details", ""),
-                    )
 
         except Exception:
             pass
@@ -277,27 +265,21 @@ Respond in JSON:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(
-                    f"{settings.LLM_SERVICE_URL}/llm/chat/completions",
-                    json={
-                        "messages": [{"role": "user", "content": prompt}],
-                        "model": settings.DEFAULT_MODEL,
-                        "max_tokens": 512,
-                        "response_format": {"type": "json_object"},
-                    },
+            from .executor import _llm_client
+            resp = await _llm_client.complete({
+                "messages": [{"role": "user", "content": prompt}],
+                "model": settings.DEFAULT_MODEL,
+                "max_tokens": 512,
+                "response_format": {"type": "json_object"},
+            })
+            content = resp.content or ""
+            if content:
+                result = json.loads(content)
+                return (
+                    result.get("is_stagnating", False),
+                    result.get("stagnation_type", "none"),
+                    result.get("recommendation", "continue"),
                 )
-
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    result = json.loads(content)
-
-                    return (
-                        result.get("is_stagnating", False),
-                        result.get("stagnation_type", "none"),
-                        result.get("recommendation", "continue"),
-                    )
 
         except Exception:
             pass
