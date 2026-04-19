@@ -786,7 +786,11 @@ Respond in JSON:
         return [f"{host}:{ips[0]}"]
 
     def _strip_html(self, html: str) -> str:
-        cleaned = re.sub(r"(?is)<(script|style).*?>.*?</\\1>", " ", html)
+        # Limit input size to prevent catastrophic regex backtracking on huge pages
+        if len(html) > 500_000:
+            html = html[:500_000]
+        # Remove script and style blocks (fixed backreference \1 not \\1)
+        cleaned = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
         cleaned = re.sub(r"(?is)<[^>]+>", " ", cleaned)
         cleaned = unescape(cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -813,7 +817,7 @@ Respond in JSON:
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1",
         }
 
-        max_bytes = 1024 * 1024
+        max_bytes = 512 * 1024  # 512KB cap — prevents massive JS-heavy pages from blocking workers
 
         if settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED:
             sandbox_resp = await self._sandbox_runner_http_get(

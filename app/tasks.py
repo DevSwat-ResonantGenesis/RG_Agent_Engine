@@ -439,8 +439,8 @@ HEAVY_TOOLS = {
     bind=True,
     name="app.tasks.execute_tool_background",
     max_retries=1,
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=60,
+    time_limit=90,
 )
 def execute_tool_background(
     self,
