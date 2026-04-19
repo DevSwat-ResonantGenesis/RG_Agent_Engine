@@ -2423,6 +2423,74 @@ async def federation_poll_tasks(
     }
 
 
+@router.post("/federation/tasks/{task_id}/step")
+async def federation_submit_step(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Submit a live step from a federated task execution.
+    Called by the local connector for each tool call / reasoning step.
+    This enables real-time streaming of agent progress to the UI.
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    body = await request.json()
+
+    from .models import FederatedTask, AgentSession, AgentStep
+
+    result = await db.execute(
+        select(FederatedTask).where(
+            FederatedTask.id == task_id,
+            FederatedTask.user_id == user_id,
+        )
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Update session to 'running' if still queued
+    sess_result = await db.execute(
+        select(AgentSession).where(AgentSession.id == task.session_id)
+    )
+    session_obj = sess_result.scalar_one_or_none()
+    if not session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_obj.status in ("queued", "initializing"):
+        session_obj.status = "running"
+
+    # Increment loop count
+    session_obj.loop_count = (session_obj.loop_count or 0) + 1
+    session_obj.total_tokens_used = (session_obj.total_tokens_used or 0) + body.get("tokens_used", 0)
+
+    step_type = body.get("step_type", "tool_call")
+    step_number = session_obj.loop_count
+
+    step = AgentStep(
+        session_id=session_obj.id,
+        step_number=step_number,
+        step_type=step_type,
+        reasoning=body.get("reasoning"),
+        tool_name=body.get("tool_name"),
+        tool_input=body.get("tool_input"),
+        tool_output=body.get("tool_output"),
+        output_data=body.get("output_data"),
+        duration_ms=body.get("duration_ms", 0),
+    )
+    db.add(step)
+    await db.commit()
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "step_number": step_number,
+        "session_status": session_obj.status,
+    }
+
+
 @router.post("/federation/tasks/{task_id}/result")
 async def federation_submit_result(
     task_id: str,
