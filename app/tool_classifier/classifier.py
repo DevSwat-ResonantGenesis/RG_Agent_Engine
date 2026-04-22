@@ -492,12 +492,10 @@ class ToolClassifier:
             try:
                 await _ensure_tables()
 
-                loop = asyncio.get_running_loop()
-                ok = await loop.run_in_executor(
-                    None, self._load_encoder
-                )
-                if not ok:
-                    return False
+                if self._encoder is None:
+                    ok = self._load_encoder()
+                    if not ok:
+                        return False
 
                 clf, stats, n_samples, version = await _load_model_from_db()
                 if clf is not None:
