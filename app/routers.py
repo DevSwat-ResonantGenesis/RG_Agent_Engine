@@ -3850,6 +3850,93 @@ async def cancel_session(
     return {"status": "cancelled", "id": session_id}
 
 
+@router.post("/{agent_id}/emergency-stop")
+async def emergency_stop_agent(
+    agent_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Emergency kill switch — cancel ALL running sessions and disable all schedules.
+
+    This is the nuclear option: stops every active session for this agent,
+    disables recurring schedules & triggers, and marks the agent as paused.
+    The agent can be resumed later via PATCH /{agent_id}/resume.
+    """
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    try:
+        agent_uuid = PyUUID(agent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid agent_id")
+
+    result = await session.execute(
+        select(AgentDefinition).where(AgentDefinition.id == agent_uuid)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # 1. Cancel all running/queued/initializing sessions
+    cancel_result = await session.execute(
+        text("""
+            UPDATE agent_sessions
+            SET status = 'cancelled', completed_at = NOW(),
+                error_message = 'Emergency stop triggered by user'
+            WHERE agent_id = :aid
+              AND status IN ('running', 'initializing', 'queued', 'waiting_approval', 'paused')
+            RETURNING id
+        """),
+        {"aid": str(agent_uuid)},
+    )
+    cancelled_sessions = [str(r[0]) for r in cancel_result.fetchall()]
+
+    # 2. Disable all schedules
+    sched_result = await session.execute(
+        text("UPDATE agent_schedules SET enabled = false WHERE agent_id = :aid AND enabled = true RETURNING id"),
+        {"aid": str(agent_uuid)},
+    )
+    disabled_schedules = sched_result.fetchall()
+
+    # 3. Disable all workflow triggers
+    trigger_result = await session.execute(
+        text("UPDATE workflow_triggers SET is_active = false WHERE agent_id = :aid AND is_active = true RETURNING id"),
+        {"aid": str(agent_uuid)},
+    )
+    disabled_triggers = trigger_result.fetchall()
+
+    # 4. Cancel any pending federated tasks
+    fed_result = await session.execute(
+        text("""
+            UPDATE federated_tasks
+            SET status = 'failed', result = '{"error": "Emergency stop"}'::jsonb
+            WHERE agent_id = :aid AND status IN ('pending', 'dispatched')
+            RETURNING id
+        """),
+        {"aid": str(agent_uuid)},
+    )
+    cancelled_fed_tasks = fed_result.fetchall()
+
+    await session.commit()
+
+    logger.warning(
+        f"[EMERGENCY STOP] Agent {agent_id}: cancelled {len(cancelled_sessions)} sessions, "
+        f"disabled {len(disabled_schedules)} schedules, {len(disabled_triggers)} triggers, "
+        f"killed {len(cancelled_fed_tasks)} federated tasks"
+    )
+
+    return {
+        "status": "stopped",
+        "agent_id": agent_id,
+        "cancelled_sessions": len(cancelled_sessions),
+        "disabled_schedules": len(disabled_schedules),
+        "disabled_triggers": len(disabled_triggers),
+        "cancelled_federated_tasks": len(cancelled_fed_tasks),
+        "session_ids": cancelled_sessions,
+    }
+
+
 # Phase 2.4: Session feedback for learning loop
 class SessionFeedbackRequest(BaseModel):
     rating: int = Field(..., ge=-1, le=1, description="-1=thumbs down, 0=neutral, 1=thumbs up")

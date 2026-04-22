@@ -318,7 +318,19 @@
 #               Both are live and used — not dead code.
 #     Status: REVIEWED — both endpoints serve different consumers, kept
 #
-# [ ] FIX 5: Reduce 53% failure rate (future work)
+# [✓] FIX 5: Ghost schedules running on archived agents (CRITICAL)
+#     ALL 13 active schedules were firing on archived/inactive agents.
+#     Users "deleted" agents but schedules kept running → ghost sessions
+#     that burn LLM credits and always fail. Major cause of 53% failure rate.
+#     Two-part fix:
+#     a. routers.py DELETE /{agent_id}: now disables all agent_schedules
+#        and workflow_triggers when archiving an agent
+#     b. scheduler_daemon.py _fire_session_inner: checks is_active/archived_at
+#        before running; auto-disables schedule if agent is archived
+#     c. Immediate SQL: disabled all 13 ghost schedules in production
+#     Status: FIXED — deployed, 13 ghost schedules killed
+#
+# [ ] FIX 6: Reduce remaining failure rate (future work)
 #     Key areas:
 #     - Infinite loop / oscillation detection needs earlier bailout
 #     - Plan creation failures need better fallback
