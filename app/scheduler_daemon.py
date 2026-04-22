@@ -213,6 +213,21 @@ async def _fire_session_inner(*, agent_id: str, goal: str, context: dict,
                 logger.error(f"[SCHEDULER] Agent {agent_id} not found for {source}")
                 return
 
+            # Skip archived/inactive agents — disable the schedule too
+            if not agent.is_active or agent.archived_at is not None:
+                logger.warning(
+                    f"[SCHEDULER] Skipping {source}: agent '{agent.name}' is "
+                    f"{'archived' if agent.archived_at else 'inactive'} — disabling schedule"
+                )
+                parts = source.split(":", 1)
+                if len(parts) == 2 and parts[0] == "schedule":
+                    await db.execute(
+                        text("UPDATE agent_schedules SET enabled = false WHERE id = :sid"),
+                        {"sid": parts[1]},
+                    )
+                    await db.commit()
+                return
+
             session = AgentSession(
                 id=uuid4(),
                 agent_id=agent.id,

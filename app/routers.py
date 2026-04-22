@@ -3239,6 +3239,18 @@ async def delete_agent(
 
     agent.is_active = False
     agent.archived_at = datetime.utcnow()
+
+    # Disable all schedules for this agent — prevent ghost runs
+    await session.execute(
+        text("UPDATE agent_schedules SET enabled = false WHERE agent_id = :aid"),
+        {"aid": str(agent.id)},
+    )
+    # Disable all workflow triggers too
+    await session.execute(
+        text("UPDATE workflow_triggers SET is_active = false WHERE agent_id = :aid"),
+        {"aid": str(agent.id)},
+    )
+
     await session.commit()
 
     # Record archive action on blockchain (best-effort)
