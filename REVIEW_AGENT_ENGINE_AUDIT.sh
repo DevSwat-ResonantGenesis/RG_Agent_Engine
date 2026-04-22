@@ -330,7 +330,16 @@
 #     c. Immediate SQL: disabled all 13 ghost schedules in production
 #     Status: FIXED — deployed, 13 ghost schedules killed
 #
-# [ ] FIX 6: Reduce remaining failure rate (future work)
+# [✓] FIX 6: Emergency stop kill switch
+#     Added POST /{agent_id}/emergency-stop endpoint that:
+#     a. Cancels ALL running/queued/initializing sessions
+#     b. Disables all agent_schedules
+#     c. Disables all workflow_triggers
+#     d. Kills pending federated tasks
+#     Frontend: red stop button in agent action bar with confirmation dialog
+#     Status: FIXED — deployed (backend + frontend)
+#
+# [ ] FIX 7: Reduce remaining failure rate (future work)
 #     Key areas:
 #     - Infinite loop / oscillation detection needs earlier bailout
 #     - Plan creation failures need better fallback
