@@ -858,10 +858,9 @@ class ToolClassifier:
 tool_classifier = ToolClassifier()
 
 
-async def preload_tool_classifier() -> None:
-    """Call at app startup (lifespan) to pre-train/load the classifier."""
+async def _preload_inner() -> None:
+    """Actual preload logic (runs in background)."""
     t0 = time.time()
-    logger.info("[ToolClassifier] Preloading at startup...")
     ok = await tool_classifier.ensure_ready()
     elapsed = (time.time() - t0) * 1000
     if ok:
@@ -876,3 +875,9 @@ async def preload_tool_classifier() -> None:
         )
     else:
         logger.warning(f"[ToolClassifier] Preload FAILED in {elapsed:.0f}ms")
+
+
+async def preload_tool_classifier() -> None:
+    """Call at app startup — fires training in background so startup isn't blocked."""
+    logger.info("[ToolClassifier] Starting background preload...")
+    asyncio.create_task(_preload_inner())
