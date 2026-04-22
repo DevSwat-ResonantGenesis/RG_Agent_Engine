@@ -492,7 +492,8 @@ class ToolClassifier:
             try:
                 await _ensure_tables()
 
-                ok = await asyncio.get_event_loop().run_in_executor(
+                loop = asyncio.get_running_loop()
+                ok = await loop.run_in_executor(
                     None, self._load_encoder
                 )
                 if not ok:
@@ -575,12 +576,25 @@ class ToolClassifier:
         from sklearn.neural_network import MLPClassifier
         from sklearn.model_selection import cross_val_score
 
-        logger.info(f"[ToolClassifier] Encoding {len(samples)} samples...")
-        X_list, y_list = [], []
+        logger.info(f"[ToolClassifier] Encoding {len(samples)} samples (batched)...")
+        # Batch-encode all samples at once for ~10x speedup vs one-by-one
+        texts = []
+        y_list = []
         for msg, ctx, tool_id in samples:
-            emb = self._encode_sample(msg, ctx)
-            X_list.append(emb)
+            parts = []
+            if ctx:
+                for m in ctx[-3:]:
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                    if content:
+                        parts.append(f"{role}: {content[:200]}")
+            parts.append(f"user: {msg}")
+            texts.append("\n".join(parts))
             y_list.append(TOOL_TO_IDX.get(tool_id, 0))
+
+        X_list = self._encoder.encode(
+            texts, normalize_embeddings=True, batch_size=128, show_progress_bar=True
+        )
 
         X = np.array(X_list)
         y = np.array(y_list)
@@ -647,7 +661,8 @@ class ToolClassifier:
             samples.extend(active)
             logger.info(f"[ToolClassifier] Added {len(active)} active samples from DB")
 
-        stats = await asyncio.get_event_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(
             None, self._train_on_samples, samples, source
         )
 
@@ -689,7 +704,8 @@ class ToolClassifier:
         if enabled_tool_ids is None:
             enabled_tool_ids = {s for s in ALL_TOOLS if s is not None}
 
-        emb = await asyncio.get_event_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        emb = await loop.run_in_executor(
             None, self._encode_sample, goal, context or []
         )
 
@@ -821,7 +837,8 @@ class ToolClassifier:
             samples.extend(custom_samples)
             logger.info(f"[ToolClassifier] Retrain: {len(custom_samples)} custom samples")
 
-        stats = await asyncio.get_event_loop().run_in_executor(
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(
             None, self._train_on_samples, samples, "retrain"
         )
 
