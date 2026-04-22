@@ -408,6 +408,8 @@ class AgentResponse(BaseModel):
     openclaw_config: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    running_sessions: int = 0
+    active_schedules: int = 0
 
 
 class SessionCreate(BaseModel):
@@ -1651,6 +1653,36 @@ async def list_agents(
         result = await session.execute(stmt)
         agents = result.scalars().all()
 
+        # Batch-query running session counts per agent
+        agent_ids = [a.id for a in agents]
+        running_map: Dict[str, int] = {}
+        schedule_map: Dict[str, int] = {}
+        if agent_ids:
+            rs = await session.execute(
+                text("""
+                    SELECT agent_id::text, COUNT(*)
+                    FROM agent_sessions
+                    WHERE agent_id = ANY(:ids)
+                      AND status IN ('running', 'initializing', 'queued', 'waiting_approval', 'paused')
+                    GROUP BY agent_id
+                """),
+                {"ids": agent_ids},
+            )
+            for row in rs.fetchall():
+                running_map[row[0]] = row[1]
+
+            sc = await session.execute(
+                text("""
+                    SELECT agent_id::text, COUNT(*)
+                    FROM agent_schedules
+                    WHERE agent_id = ANY(:ids) AND enabled = true
+                    GROUP BY agent_id
+                """),
+                {"ids": agent_ids},
+            )
+            for row in sc.fetchall():
+                schedule_map[row[0]] = row[1]
+
         mutated = False
         responses: List[AgentResponse] = []
         for a in agents:
@@ -1696,6 +1728,8 @@ async def list_agents(
                     openclaw_config=getattr(a, 'openclaw_config', None),
                     created_at=a.created_at.isoformat() if a.created_at else None,
                     updated_at=a.updated_at.isoformat() if a.updated_at else None,
+                    running_sessions=running_map.get(str(a.id), 0),
+                    active_schedules=schedule_map.get(str(a.id), 0),
                 )
             )
 
