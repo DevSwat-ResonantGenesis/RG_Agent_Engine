@@ -490,12 +490,16 @@ class ToolClassifier:
             if self._is_trained and self._encoder is not None:
                 return True
             try:
+                print("[ToolClassifier] ensure_ready: creating tables...", flush=True)
                 await _ensure_tables()
 
                 if self._encoder is None:
+                    print("[ToolClassifier] ensure_ready: loading encoder...", flush=True)
                     ok = self._load_encoder()
                     if not ok:
+                        print("[ToolClassifier] ensure_ready: encoder load FAILED", flush=True)
                         return False
+                    print("[ToolClassifier] ensure_ready: encoder loaded OK", flush=True)
 
                 clf, stats, n_samples, version = await _load_model_from_db()
                 if clf is not None:
@@ -529,12 +533,16 @@ class ToolClassifier:
                         )
                         return True
 
-                logger.info("[ToolClassifier] No valid model in DB, training from seed...")
+                print("[ToolClassifier] No valid model in DB, training from seed...", flush=True)
                 await self._train_and_save(source="seed")
+                print("[ToolClassifier] Seed training complete!", flush=True)
                 return True
 
             except Exception as e:
+                print(f"[ToolClassifier] Init EXCEPTION: {e}", flush=True)
                 logger.error(f"[ToolClassifier] Init failed: {e}", exc_info=True)
+                import traceback
+                traceback.print_exc()
                 return False
 
     def _load_encoder(self) -> bool:
@@ -876,23 +884,35 @@ tool_classifier = ToolClassifier()
 async def _preload_inner() -> None:
     """Actual preload logic (runs in background)."""
     t0 = time.time()
-    ok = await tool_classifier.ensure_ready()
-    elapsed = (time.time() - t0) * 1000
-    if ok:
-        stats = await tool_classifier.get_stats()
-        logger.info(
-            f"[ToolClassifier] Preload complete in {elapsed:.0f}ms — "
-            f"v{stats['model_version']}, "
-            f"tools={stats['n_tools']}, "
-            f"samples={stats['train_stats'].get('n_samples', 0)}, "
-            f"accuracy={stats['train_stats'].get('train_accuracy', 0)}, "
-            f"active_in_db={stats['active_samples_in_db']}"
-        )
-    else:
-        logger.warning(f"[ToolClassifier] Preload FAILED in {elapsed:.0f}ms")
+    try:
+        ok = await tool_classifier.ensure_ready()
+        elapsed = (time.time() - t0) * 1000
+        if ok:
+            stats = await tool_classifier.get_stats()
+            msg = (
+                f"[ToolClassifier] Preload complete in {elapsed:.0f}ms — "
+                f"v{stats['model_version']}, "
+                f"tools={stats['n_tools']}, "
+                f"samples={stats['train_stats'].get('n_samples', 0)}, "
+                f"accuracy={stats['train_stats'].get('train_accuracy', 0)}, "
+                f"active_in_db={stats['active_samples_in_db']}"
+            )
+            logger.info(msg)
+            print(msg, flush=True)
+        else:
+            msg = f"[ToolClassifier] Preload FAILED in {elapsed:.0f}ms"
+            logger.warning(msg)
+            print(msg, flush=True)
+    except Exception as e:
+        elapsed = (time.time() - t0) * 1000
+        msg = f"[ToolClassifier] Preload EXCEPTION in {elapsed:.0f}ms: {e}"
+        logger.error(msg, exc_info=True)
+        print(msg, flush=True)
+        import traceback
+        traceback.print_exc()
 
 
 async def preload_tool_classifier() -> None:
     """Call at app startup — fires training in background so startup isn't blocked."""
-    logger.info("[ToolClassifier] Starting background preload...")
+    print("[ToolClassifier] Starting background preload...", flush=True)
     asyncio.create_task(_preload_inner())
