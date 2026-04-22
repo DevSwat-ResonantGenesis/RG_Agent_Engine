@@ -416,16 +416,22 @@ Respond in JSON:
     
     async def _execute_strategy(self, goal: AutonomousGoal, strategy: str) -> bool:
         """Execute a strategy to overcome an obstacle."""
-        from .agent_executor import get_agent_executor
+        from .executor import agent_executor
         
         try:
-            executor = await get_agent_executor()
-            result = await executor.execute(
-                agent_id=goal.agent_id,
-                task=f"Execute this strategy: {strategy}",
-                context={"goal": goal.description},
-            )
-            return result.success
+            from .db import async_session
+            from .models import AgentDefinition, AgentSession
+            async with async_session() as db:
+                agent = await db.get(AgentDefinition, goal.agent_id)
+                if not agent:
+                    logger.error(f"Agent {goal.agent_id} not found for strategy execution")
+                    return False
+                result = await agent_executor.run_session(
+                    agent,
+                    f"Execute this strategy: {strategy}",
+                    {"goal": goal.description},
+                )
+                return result.get("status") == "completed"
         except Exception as e:
             logger.error(f"Strategy execution failed: {e}")
             return False

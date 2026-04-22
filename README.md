@@ -1,6 +1,6 @@
 # RG Agent Engine
 
-> **Part of the [ResonantGenesis](https://dev-swat.com) platform** — Autonomous agent execution framework with goal pursuit, multi-agent orchestration, 161 built-in tools, BYOK LLM routing, and safety-governed execution loops.
+> **Part of the [ResonantGenesis](https://dev-swat.com) platform** — Autonomous agent execution framework with neural tool classifier, goal pursuit, multi-agent orchestration, 200+ tools, BYOK LLM routing, and safety-governed execution loops.
 
 [![Status: Production](https://img.shields.io/badge/Status-Production-brightgreen.svg)]()
 [![License: RG Source Available](https://img.shields.io/badge/License-RG%20Source%20Available-blue.svg)](LICENSE.txt)
@@ -34,7 +34,8 @@ The Agent Engine is the core service that lets users **create, configure, and ru
 **Key capabilities:**
 - CRUD for agent definitions, teams, schedules, triggers, and webhooks
 - Autonomous execution loop with up to 200 iterations per session
-- 161 built-in tools (web search, code execution, memory, media generation, integrations, etc.)
+- 200+ tools with **neural ML classifier** (sentence-transformer + MLP) for intelligent tool selection
+- Per-agent tool configuration: `tool_mode="smart"` (classifier picks) or `"manual"` (only selected tools)
 - BYOK (Bring Your Own Key) — users can provide their own LLM API keys
 - Multi-provider LLM fallback via `rg_llm.UnifiedLLMClient`
 - Safety envelope with threat-level classification, approval gates, and rate limiting
@@ -109,8 +110,7 @@ RG_Agent_Engine/
 │   ├── db.py                      # SQLAlchemy async engine + session factory
 │   │
 │   ├── # ── CORE EXECUTION ──
-│   ├── executor.py                # (3806 lines) Main ReAct loop, tool handlers, BYOK fetch, LLM adapter
-│   ├── agent_executor.py          # (680 lines) Simpler executor variant (used by some routers)
+│   ├── executor.py                # Main ReAct loop, tool handlers, neural classifier integration
 │   ├── planner.py                 # Goal decomposition + plan generation via LLM
 │   ├── verifier.py                # Post-execution verification agent
 │   ├── safety.py                  # Safety envelope (threat classification, approval gates)
@@ -143,15 +143,15 @@ RG_Agent_Engine/
 │   ├── webhooks.py                # /webhooks/* — webhook triggers for agents
 │   │
 │   ├── # ── SUB-PACKAGES ──
-│   ├── rg_tool_registry/          # Unified tool definition + observability
+│   ├── tool_classifier/            # Neural tool classifier (ML-based tool routing)
+│   │   ├── __init__.py            # Exports: ToolClassifier, tool_classifier, preload_tool_classifier
+│   │   ├── classifier.py          # Sentence-transformer + MLP classifier, active learning, DB persistence
+│   │   └── training_data.py       # 1500+ labeled training samples for 200+ tools
+│   ├── rg_tool_registry/          # Tool definitions + observability (lite)
 │   │   ├── registry.py            # ToolDef dataclass, ToolRegistry, format converters
-│   │   ├── builtin_tools.py       # 161 built-in tool definitions (19 categories)
-│   │   ├── builtin_tools_ide.py   # IDE-only tool definitions
-│   │   ├── native_fc.py           # Native function calling for LLM tool use
+│   │   ├── builtin_tools.py       # Built-in tool definitions (19 categories)
 │   │   ├── observability.py       # Tool call timing, success/fail tracking
-│   │   ├── streaming.py           # Streaming tool results
-│   │   ├── api_catalog.py         # Platform API tool catalog
-│   │   └── builder.py             # Dynamic tool builder
+│   │   └── api_catalog.py         # Platform API service catalog
 │   ├── project_builder/           # Full-stack project builder sub-agent
 │   │   ├── builder_agent.py       # Multi-step code generation agent
 │   │   ├── code_validator.py      # Validates generated code
@@ -282,9 +282,17 @@ The heart of the service. Contains:
 - **`TriggerManager`** — Manages webhook/schedule/event triggers
 - **`_llm_client`** — Singleton `_LLMClientAdapter` instance (used by executor, planner, agentic_chat)
 
-### `agent_executor.py` — Simpler Executor (680 lines)
+### `tool_classifier/classifier.py` — Neural Tool Classifier
 
-Alternative executor used by some routers. Also fetches BYOK keys, calls `_llm_client.complete()`.
+- **`ToolClassifier`** — ML-based tool routing using sentence-transformer + sklearn MLP
+  - `predict(goal, enabled_tool_ids)` — Predict best tool for a goal
+  - `predict_top_n(goal, n=10)` — Get ranked top-N tools for EXECUTION_FRAME injection
+  - `add_custom_tools(names)` — Expand label space with user-defined tools
+  - `retrain(custom_samples)` — Retrain with seed data + active learning + custom samples
+- Model and active learning data persisted to PostgreSQL (survives container restarts)
+- Per-agent tool filtering: `tool_mode="smart"` uses all tools, `"manual"` restricts to `agent.tools` array
+- ~200 built-in tool labels, expandable via custom tools
+- Active learning: every prediction saved to DB for continuous improvement
 
 ### `planner.py` — Goal Decomposition (247 lines)
 
@@ -357,9 +365,28 @@ Each provider tries: **BYOK key → system env key** before moving to next provi
 
 ---
 
-## Tool Registry
+## Tool System
 
-### `rg_tool_registry/builtin_tools.py` — 161 tools in 19 categories
+### Neural Tool Classifier (`tool_classifier/`)
+
+The Agent Engine uses an **embedded ML classifier** (same architecture as RG_Chat) to pre-filter the tools shown to the LLM in the execution prompt. This reduces token usage and improves tool selection accuracy.
+
+**Architecture:**
+1. Goal text encoded via `sentence-transformers/all-MiniLM-L6-v2` → 384-dim embedding
+2. Trained `MLPClassifier(256, 128)` predicts tool probabilities over 200+ labels
+3. Top-N tools injected into EXECUTION_FRAME (replacing the old hardcoded list)
+4. Per-agent filtering via `tool_mode` + `tools` columns on `AgentDefinition`
+5. Active learning: every prediction saved to PostgreSQL for periodic retraining
+
+**API Endpoints:**
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/agents/tools/classifier/predict` | Predict top tools for a goal |
+| POST | `/agents/tools/classifier/retrain` | Retrain with seed + active + custom data |
+| GET | `/agents/tools/classifier/stats` | Model stats (version, accuracy, samples) |
+| POST | `/agents/tools/classifier/add-custom-tools` | Add custom tool labels |
+
+### `rg_tool_registry/builtin_tools.py` — Tool Definitions (19 categories)
 
 | Category | Examples |
 |----------|----------|
@@ -537,6 +564,9 @@ All models use **SQLAlchemy async** with PostgreSQL (asyncpg driver).
 | `lxml` | ≥5.0.0 | XML/HTML parser |
 | `tiktoken` | ≥0.5.0 | Token counting |
 | `websockets` | ≥12.0 | WebSocket support |
+| `sentence-transformers` | ≥2.2.0 | Neural tool classifier encoder |
+| `scikit-learn` | ≥1.3.0 | MLP classifier for tool routing |
+| `numpy` | ≥1.24.0 | Numerical operations |
 
 ### External Libraries (NOT in requirements.txt)
 

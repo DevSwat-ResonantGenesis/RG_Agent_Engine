@@ -2086,6 +2086,68 @@ async def list_platform_tools():
 
 
 # ════════════════════════════════════════════════════════════════════
+# TOOL CLASSIFIER — Neural tool routing endpoints
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/tools/classifier/predict")
+async def predict_tool(request: Request):
+    """Predict the best tool(s) for a given goal using the neural classifier."""
+    from .tool_classifier import tool_classifier
+    body = await request.json()
+    goal = body.get("goal", "")
+    n = body.get("n", 10)
+    enabled = body.get("enabled_tool_ids")
+
+    if not goal:
+        raise HTTPException(status_code=400, detail="goal is required")
+
+    enabled_set = set(enabled) if enabled else None
+    top = await tool_classifier.predict_top_n(
+        goal=goal, n=n, enabled_tool_ids=enabled_set,
+    )
+    return {
+        "goal": goal,
+        "predictions": [{"tool": t, "confidence": round(c, 4)} for t, c in top],
+    }
+
+
+@router.post("/tools/classifier/retrain")
+async def retrain_classifier(request: Request):
+    """Retrain the neural tool classifier with seed + active learning data.
+    Optionally include custom_samples: [[message, context, tool_id], ...]"""
+    from .tool_classifier import tool_classifier
+    body = await request.json() if await request.body() else {}
+    custom_raw = body.get("custom_samples", [])
+
+    custom_samples = []
+    for item in custom_raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 3:
+            custom_samples.append((item[0], item[1], item[2]))
+
+    stats = await tool_classifier.retrain(custom_samples=custom_samples or None)
+    return {"status": "retrained", "stats": stats}
+
+
+@router.get("/tools/classifier/stats")
+async def classifier_stats():
+    """Get neural tool classifier statistics."""
+    from .tool_classifier import tool_classifier
+    return await tool_classifier.get_stats()
+
+
+@router.post("/tools/classifier/add-custom-tools")
+async def add_custom_tools(request: Request):
+    """Add custom tool labels to the classifier. Requires retrain afterwards."""
+    from .tool_classifier import tool_classifier
+    body = await request.json()
+    tool_names = body.get("tool_names", [])
+    if not tool_names:
+        raise HTTPException(status_code=400, detail="tool_names is required")
+    added = tool_classifier.add_custom_tools(tool_names)
+    return {"added": added, "total_tools": len(tool_classifier._custom_tools)}
+
+
+# ════════════════════════════════════════════════════════════════════
 # FEDERATION — External agents running on user hardware
 # ════════════════════════════════════════════════════════════════════
 

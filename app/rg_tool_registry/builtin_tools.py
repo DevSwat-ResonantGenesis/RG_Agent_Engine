@@ -439,27 +439,16 @@ GITHUB_TOOLS = [
 
 # ── TOOL MANAGEMENT ──
 TOOL_MANAGEMENT_TOOLS = [
-    ToolDef(name="create_tool", description="Create custom HTTP tool stored in DB. Tool becomes available platform-wide when is_shared=true.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING, required=True), ToolParam("endpoint_url", ParamType.STRING, required=True),
-                    ToolParam("category", ParamType.STRING, "tool category (auto-created if new)", default="custom"),
-                    ToolParam("http_method", ParamType.STRING, default="GET"), ToolParam("parameters", ParamType.OBJECT, "JSON param schema"),
-                    ToolParam("request_body", ParamType.OBJECT, "JSON body template"), ToolParam("is_shared", ParamType.BOOLEAN, "make available platform-wide", default=False)],
-            handler="_custom_create_tool", access={_R, _G, _A}, priority=40),
-    ToolDef(name="list_tools", description="List user's custom tools and all shared platform tools.", category=ToolCategory.SYSTEM,
-            params=[], handler="_custom_list_tools", access={_R, _G, _A}, priority=40),
+    ToolDef(name="create_tool", description="Create custom HTTP tool stored in DB.", category=ToolCategory.SYSTEM,
+            params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING, required=True), ToolParam("endpoint_url", ParamType.STRING, required=True)],
+            handler="_custom_create_tool", access={_R}, priority=40),
+    ToolDef(name="list_tools", description="List user's custom tools.", category=ToolCategory.SYSTEM,
+            params=[], handler="_custom_list_tools", access={_R}, priority=40),
     ToolDef(name="delete_tool", description="Delete a custom tool.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("tool_name", ParamType.STRING, required=True)], handler="_custom_delete_tool", access={_R, _G, _A}, priority=40),
+            params=[ToolParam("tool_name", ParamType.STRING, required=True)], handler="_custom_delete_tool", access={_R}, priority=40),
     ToolDef(name="update_tool", description="Update an existing custom tool.", category=ToolCategory.SYSTEM,
             params=[ToolParam("tool_name", ParamType.STRING, required=True), ToolParam("description", ParamType.STRING), ToolParam("endpoint_url", ParamType.STRING), ToolParam("http_method", ParamType.STRING)],
-            handler="_custom_update_tool", access={_R, _G, _A}, priority=40),
-    ToolDef(name="auto_build_tool", description="LLM designs, validates (AST safety scan), and registers a new tool at runtime. Describe what the tool should do and it will be created automatically.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("capability", ParamType.STRING, "what the tool should do", required=True),
-                    ToolParam("category", ParamType.STRING, "tool category", default="custom"),
-                    ToolParam("is_shared", ParamType.BOOLEAN, "make available platform-wide", default=True)],
-            handler="_custom_auto_build_tool", access={_R, _G, _A}, priority=35),
-    ToolDef(name="check_tool_exists", description="Check if a capability exists as a tool. Returns the tool if found, or suggests building one if not.", category=ToolCategory.SYSTEM,
-            params=[ToolParam("capability", ParamType.STRING, "what you need the tool to do", required=True)],
-            handler="_custom_check_tool_exists", access={_R, _G, _A}, priority=35),
+            handler="_custom_update_tool", access={_R}, priority=40),
 ]
 
 # ── GIT OPERATIONS ──
@@ -522,6 +511,309 @@ IDE_FILESYSTEM_TOOLS = [
             params=[ToolParam("command_id", ParamType.STRING, required=True)], priority=5),
 ]
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TWIN-PARITY TOOLS — Everything Twin has, adapted for Resonant Genesis
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── SCRAPING (Firecrawl + Apify — Twin's scrape_page + scrape_platforms) ──
+SCRAPING_TOOLS = [
+    ToolDef(name="scrape_page", description="Scrape any webpage with browser automation (Firecrawl). Supports waitFor, click actions, CSS selectors, mobile mode.",
+            category=ToolCategory.SCRAPING,
+            params=[ToolParam("url", ParamType.STRING, "URL to scrape", required=True),
+                    ToolParam("format", ParamType.STRING, "output format", default="markdown", enum=["summary","markdown"]),
+                    ToolParam("wait_for", ParamType.INTEGER, "ms to wait for JS rendering (0-60000)"),
+                    ToolParam("actions", ParamType.ARRAY, "browser actions: wait/click/write/press/scroll"),
+                    ToolParam("include_tags", ParamType.ARRAY, "CSS selectors to keep", items_type="string"),
+                    ToolParam("exclude_tags", ParamType.ARRAY, "CSS selectors to remove", items_type="string"),
+                    ToolParam("timeout", ParamType.INTEGER, "total timeout ms (0-300000)"),
+                    ToolParam("mobile", ParamType.BOOLEAN, "mobile user-agent", default=False)],
+            handler="_custom_scrape_page", access={_R, _A}, priority=10, max_result_chars=8000),
+    ToolDef(name="scrape_platforms", description="Scrape 35+ platforms via Apify: LinkedIn, Instagram, TikTok, Reddit, YouTube, Amazon, Zillow, Google Maps, etc.",
+            category=ToolCategory.SCRAPING,
+            params=[ToolParam("platform", ParamType.STRING, "platform scraper name", required=True,
+                    enum=["linkedin_jobs","linkedin_profiles","linkedin_profile_posts","linkedin_company_posts","linkedin_post_search","linkedin_profile_search",
+                          "upwork_jobs","wellfound_jobs","indeed","instagram","instagram_reels","tiktok","reddit","facebook_posts","facebook_groups",
+                          "youtube","youtube_downloader","etsy","amazon","ebay","ebay_product_listings","facebook_marketplace","google_maps",
+                          "realtor","seloger","zillow_zip_search","airbnb","booking","facebook_ads","leads_finder"]),
+                    ToolParam("action", ParamType.STRING, "scraper action", required=True, enum=["get_input_schema","run","status","result","search","get_actor"]),
+                    ToolParam("input", ParamType.OBJECT, "scraper input parameters"),
+                    ToolParam("run_id", ParamType.STRING, "run ID for status/result checks")],
+            handler="_custom_scrape_platforms", access={_R, _A}, priority=15, max_result_chars=8000),
+]
+
+# ── DOCUMENTS (Google Sheets, Google Docs, Presentations — Twin's document tools) ──
+DOCUMENT_TOOLS = [
+    ToolDef(name="google_sheets", description="Google Sheets: create, read, append, update, export, list sheets/tabs.",
+            category=ToolCategory.DOCUMENTS,
+            params=[ToolParam("action", ParamType.STRING, "operation", required=True,
+                    enum=["create","read","append","update","export","list_sheets","list_tabs"]),
+                    ToolParam("spreadsheet_id", ParamType.STRING, "existing spreadsheet ID"),
+                    ToolParam("tab_name", ParamType.STRING, "tab/sheet name"),
+                    ToolParam("range", ParamType.STRING, "A1 notation range"),
+                    ToolParam("headers", ParamType.ARRAY, "column headers", items_type="string"),
+                    ToolParam("rows", ParamType.ARRAY, "data rows"),
+                    ToolParam("export_format", ParamType.STRING, "CSV or XLSX", enum=["csv","xlsx"])],
+            handler="_custom_google_sheets", access={_R, _A}, requires_api_key="google-sheets", priority=30),
+    ToolDef(name="google_docs", description="Google Docs: create, read, append, insert, replace formatted documents.",
+            category=ToolCategory.DOCUMENTS,
+            params=[ToolParam("action", ParamType.STRING, "operation", required=True,
+                    enum=["create","read","append","insert","replace","list_docs"]),
+                    ToolParam("document_id", ParamType.STRING, "existing document ID or URL"),
+                    ToolParam("title", ParamType.STRING, "document title"),
+                    ToolParam("content", ParamType.STRING, "markdown-formatted content"),
+                    ToolParam("position", ParamType.INTEGER, "insert position (character index)")],
+            handler="_custom_google_docs", access={_R, _A}, requires_api_key="google-docs", priority=30),
+    ToolDef(name="create_presentation", description="Generate AI slide deck as PDF. 1-60 slides with AI or stock images.",
+            category=ToolCategory.DOCUMENTS,
+            params=[ToolParam("input_text", ParamType.STRING, "topic or content for slides", required=True),
+                    ToolParam("format", ParamType.STRING, "output format", default="presentation", enum=["presentation","document","webpage","social"]),
+                    ToolParam("num_cards", ParamType.INTEGER, "number of slides (1-60)", default=10),
+                    ToolParam("text_amount", ParamType.STRING, "text density", default="medium", enum=["brief","medium","detailed","extensive"]),
+                    ToolParam("image_source", ParamType.STRING, "image source", default="aiGenerated", enum=["aiGenerated","unsplash","pictographic","noImages"]),
+                    ToolParam("template_id", ParamType.STRING, "template ID"),
+                    ToolParam("generation_id", ParamType.STRING, "poll existing generation")],
+            handler="_custom_create_presentation", access={_R, _A}, priority=35),
+]
+
+# ── ORCHESTRATOR TOOLS (Twin's 21 orchestrator tools — workspace/agent management) ──
+ORCHESTRATOR_TOOLS = [
+    ToolDef(name="build_agent", description="Create a new agent and start its first build — the builder discovers APIs, creates tools, and writes instructions.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("name", ParamType.STRING, "agent name", required=True),
+                    ToolParam("goal", ParamType.STRING, "outcome-oriented goal (2-3 sentences)", required=True),
+                    ToolParam("icon", ParamType.STRING, "agent icon ID")],
+            handler="_custom_build_agent", access={_R}, priority=5),
+    ToolDef(name="continue_build", description="Modify or extend an existing agent — add tools, change workflow, update instructions.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("agent_id", ParamType.STRING, "agent to modify", required=True),
+                    ToolParam("instructions", ParamType.STRING, "what to change (3-part: changes/keeps/stops)", required=True)],
+            handler="_custom_continue_build", access={_R}, priority=5),
+    ToolDef(name="message_build", description="Send guidance to a builder while it's actively working on an agent.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("message", ParamType.STRING, "guidance or correction", required=True)],
+            handler="_custom_message_build", access={_R}, priority=5),
+    ToolDef(name="stop_run", description="Cancel an active agent run.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("run_id", ParamType.STRING, required=True)],
+            handler="_custom_stop_run", access={_R}, priority=10),
+    ToolDef(name="set_trigger", description="Set up scheduled automation — minute, hour, day, week, or custom cron.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True),
+                    ToolParam("frequency", ParamType.STRING, "trigger frequency", required=True, enum=["minute","hour","day","week","custom"]),
+                    ToolParam("cron_expression", ParamType.STRING, "custom cron (when frequency=custom)")],
+            handler="_custom_set_trigger", access={_R}, priority=10),
+    ToolDef(name="set_workspace_name", description="Name and brand a workspace — describes the broad domain.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("name", ParamType.STRING, "workspace name", required=True),
+                    ToolParam("icon", ParamType.STRING, "workspace icon ID")],
+            handler="_custom_set_workspace_name", access={_R}, priority=15),
+    ToolDef(name="open_interface_editor", description="Launch a full React app builder on top of an agent's database — creates shareable UI.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("agent_id", ParamType.STRING, required=True)],
+            handler="_custom_open_interface_editor", access={_R}, priority=20),
+    ToolDef(name="get_user_memory", description="Recall persistent user facts — name, role, company, preferences, timezone.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[], handler="_custom_get_user_memory", access={_R}, priority=5),
+    ToolDef(name="update_user_memory", description="Save new facts about the user for future sessions — role, company, preferences.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("facts", ParamType.OBJECT, "key-value facts to store", required=True)],
+            handler="_custom_update_user_memory", access={_R}, priority=10),
+    ToolDef(name="list_workspace_databases", description="List all agent databases in the workspace for cross-agent querying.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[], handler="_custom_list_workspace_databases", access={_R}, priority=20),
+    ToolDef(name="query_cross_agent_database", description="Read-only SQL query across agent databases — SELECT only.",
+            category=ToolCategory.ORCHESTRATOR,
+            params=[ToolParam("agent_id", ParamType.STRING, "target agent's database", required=True),
+                    ToolParam("query", ParamType.STRING, "SQL SELECT query", required=True)],
+            handler="_custom_query_cross_agent_db", access={_R}, priority=20),
+    ToolDef(name="get_credits_info", description="Get billing info — credits remaining, plan, usage history.",
+            category=ToolCategory.BILLING,
+            params=[], handler="_custom_get_credits_info", access={_R}, priority=20),
+    ToolDef(name="present_billing_offer", description="Present billing/upgrade options to the user.",
+            category=ToolCategory.BILLING,
+            params=[], handler="_custom_present_billing_offer", access={_R}, priority=25),
+]
+
+# ── ENHANCED EMAIL (Twin's configure_smtp / delete_smtp) ──
+SMTP_TOOLS = [
+    ToolDef(name="configure_smtp", description="Configure custom SMTP server for sending emails without rate limits.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[ToolParam("host", ParamType.STRING, "SMTP host", required=True),
+                    ToolParam("port", ParamType.INTEGER, "SMTP port", required=True),
+                    ToolParam("username", ParamType.STRING, "SMTP username", required=True),
+                    ToolParam("password", ParamType.STRING, "SMTP password (collected via Secret input)", required=True),
+                    ToolParam("from_email", ParamType.STRING, "sender email", required=True),
+                    ToolParam("from_name", ParamType.STRING, "sender display name"),
+                    ToolParam("use_tls", ParamType.BOOLEAN, "use TLS encryption", default=True)],
+            handler="_custom_configure_smtp", access={_R}, priority=30),
+    ToolDef(name="delete_smtp", description="Remove custom SMTP config and revert to default email sending.",
+            category=ToolCategory.INTEGRATIONS,
+            params=[], handler="_custom_delete_smtp", access={_R}, priority=35),
+]
+
+# ── ENHANCED MEDIA (Twin's generate_video) ──
+VIDEO_TOOLS = [
+    ToolDef(name="generate_video", description="Generate video from text prompt. Async — submit then poll for result.",
+            category=ToolCategory.MEDIA,
+            params=[ToolParam("prompt", ParamType.STRING, "video description", required=True),
+                    ToolParam("aspect_ratio", ParamType.STRING, "video aspect ratio", default="landscape", enum=["square","landscape","portrait"]),
+                    ToolParam("video_id", ParamType.STRING, "poll existing generation")],
+            handler="_custom_generate_video", access={_R, _A}, requires_api_key="openai", priority=35, max_result_chars=2000),
+]
+
+# ── ENHANCED FILE OPERATIONS (Twin's download/upload/extract) ──
+FILE_OPS_TOOLS = [
+    ToolDef(name="file_download_curl", description="Download file from any URL with full curl options — headers, auth, redirects.",
+            category=ToolCategory.FILESYSTEM,
+            params=[ToolParam("url", ParamType.STRING, "download URL", required=True),
+                    ToolParam("headers", ParamType.OBJECT, "custom HTTP headers"),
+                    ToolParam("auth", ParamType.STRING, "auth string (user:pass)"),
+                    ToolParam("follow_redirects", ParamType.BOOLEAN, "follow redirects", default=True)],
+            handler="_custom_file_download_curl", access={_R, _A}, priority=15),
+    ToolDef(name="file_upload_curl", description="Upload file to any API endpoint — supports multipart, headers, auth.",
+            category=ToolCategory.FILESYSTEM,
+            params=[ToolParam("url", ParamType.STRING, "upload endpoint", required=True),
+                    ToolParam("file_path", ParamType.STRING, "file to upload", required=True),
+                    ToolParam("method", ParamType.STRING, "HTTP method", default="POST"),
+                    ToolParam("headers", ParamType.OBJECT, "custom headers"),
+                    ToolParam("multipart", ParamType.BOOLEAN, "multipart upload", default=True)],
+            handler="_custom_file_upload_curl", access={_R, _A}, priority=15),
+    ToolDef(name="file_extract_zip", description="Extract ZIP/archive files, then read individual files.",
+            category=ToolCategory.FILESYSTEM,
+            params=[ToolParam("path", ParamType.STRING, "archive path", required=True),
+                    ToolParam("destination", ParamType.STRING, "extract destination")],
+            handler="_custom_file_extract_zip", access={_R, _A}, priority=20),
+]
+
+# ── STOCK MARKET ENHANCED (Twin's quote/historical/news actions) ──
+STOCK_MARKET_TOOLS = [
+    ToolDef(name="stock_market_data", description="Stock market data: real-time quotes, historical prices (20+ years), news with sentiment scores.",
+            category=ToolCategory.UTILITIES,
+            params=[ToolParam("action", ParamType.STRING, "data type", required=True, enum=["quote","historical","news"]),
+                    ToolParam("symbol", ParamType.STRING, "ticker symbol (AAPL, BTC-USD)", required=True),
+                    ToolParam("period", ParamType.STRING, "historical period", enum=["1d","5d","1mo","3mo","6mo","1y","5y","max"])],
+            handler="_custom_stock_market_data", access={_R, _A}, priority=25, max_result_chars=4000),
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OAUTH INTEGRATIONS (35 services — Twin parity)
+# Each OAuth tool represents a one-click authenticated connection to a service.
+# ══════════════════════════════════════════════════════════════════════════════
+OAUTH_TOOLS = [
+    # --- Productivity ---
+    ToolDef(name="notion", description="Notion: create/read/update pages, databases, blocks, queries.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["create_page","read_page","update_page","query_database","list_databases","create_database"])],
+            handler="_custom_notion", access={_R, _A}, requires_api_key="notion", priority=30),
+    ToolDef(name="discord", description="Discord: send/read messages, manage channels, servers, reactions.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["send_message","read_messages","list_channels","list_servers"])],
+            handler="_custom_discord", access={_R, _A}, requires_api_key="discord", priority=30),
+    ToolDef(name="asana", description="Asana: manage tasks, projects, sections, workspaces.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_tasks","create_task","update_task","list_projects","list_workspaces"])],
+            handler="_custom_asana", access={_R, _A}, requires_api_key="asana", priority=30),
+    ToolDef(name="clickup", description="ClickUp: tasks, lists, spaces, time tracking, docs.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_tasks","create_task","update_task","list_spaces","list_folders"])],
+            handler="_custom_clickup", access={_R, _A}, requires_api_key="clickup", priority=30),
+    ToolDef(name="linear", description="Linear: issues, projects, cycles, teams, labels.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_issues","create_issue","update_issue","list_projects","list_teams"])],
+            handler="_custom_linear", access={_R, _A}, requires_api_key="linear", priority=30),
+    ToolDef(name="monday", description="Monday.com: boards, items, updates, columns.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_boards","list_items","create_item","update_item"])],
+            handler="_custom_monday", access={_R, _A}, requires_api_key="monday", priority=30),
+    ToolDef(name="miro", description="Miro: board access, create/read items, collaboration.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_boards","get_board","create_item"])],
+            handler="_custom_miro", access={_R, _A}, requires_api_key="miro", priority=35),
+    ToolDef(name="atlassian", description="Atlassian (Jira/Confluence): issues, projects, pages, spaces.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_issues","create_issue","list_projects","search_pages"])],
+            handler="_custom_atlassian", access={_R, _A}, requires_api_key="atlassian", priority=30),
+    ToolDef(name="zoom", description="Zoom: meetings, recordings, participants.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_meetings","create_meeting","get_recording","list_participants"])],
+            handler="_custom_zoom", access={_R, _A}, requires_api_key="zoom", priority=30),
+    ToolDef(name="calendly", description="Calendly: events, scheduling links, invitees.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_events","list_event_types","get_invitees"])],
+            handler="_custom_calendly", access={_R, _A}, requires_api_key="calendly", priority=30),
+    ToolDef(name="dropbox", description="Dropbox: file management, sharing, folder operations.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_files","upload","download","create_folder","share"])],
+            handler="_custom_dropbox", access={_R, _A}, requires_api_key="dropbox", priority=30),
+    ToolDef(name="dribbble", description="Dribbble: design access, shots, projects.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_shots","get_shot","list_projects"])],
+            handler="_custom_dribbble", access={_R, _A}, requires_api_key="dribbble", priority=35),
+    ToolDef(name="typeform", description="Typeform: form responses, workspaces, form definitions.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_forms","get_responses","list_workspaces"])],
+            handler="_custom_typeform", access={_R, _A}, requires_api_key="typeform", priority=30),
+    # --- CRM & Sales ---
+    ToolDef(name="hubspot", description="HubSpot: contacts, deals, companies, pipelines, emails, tasks.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_contacts","create_contact","list_deals","create_deal","list_companies","list_pipelines"])],
+            handler="_custom_hubspot", access={_R, _A}, requires_api_key="hubspot", priority=30),
+    ToolDef(name="salesforce", description="Salesforce: leads, opportunities, accounts, reports — full CRM access.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["query","create_record","update_record","list_objects","describe_object"])],
+            handler="_custom_salesforce", access={_R, _A}, requires_api_key="salesforce", priority=30),
+    ToolDef(name="pipedrive", description="PipeDrive: deals, contacts, activities, pipelines.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_deals","create_deal","list_persons","list_pipelines"])],
+            handler="_custom_pipedrive", access={_R, _A}, requires_api_key="pipedrive", priority=30),
+    ToolDef(name="attio", description="Attio: contacts, companies, lists, notes — modern CRM.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_records","create_record","list_objects","search"])],
+            handler="_custom_attio", access={_R, _A}, requires_api_key="attio", priority=30),
+    ToolDef(name="zoho_crm", description="Zoho CRM: leads, contacts, deals, accounts — full CRM.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_records","create_record","update_record","search"])],
+            handler="_custom_zoho_crm", access={_R, _A}, requires_api_key="zoho-crm", priority=30),
+    ToolDef(name="mailchimp", description="Mailchimp: campaigns, audiences, templates, analytics.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_campaigns","create_campaign","list_audiences","list_templates","get_report"])],
+            handler="_custom_mailchimp", access={_R, _A}, requires_api_key="mailchimp", priority=30),
+    ToolDef(name="airtable", description="Airtable: bases, tables, records, views, formulas.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_bases","list_records","create_record","update_record","list_tables"])],
+            handler="_custom_airtable", access={_R, _A}, requires_api_key="airtable", priority=30),
+    # --- Dev ---
+    ToolDef(name="gitlab", description="GitLab: repos, issues, merge requests, pipelines — full access.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_projects","list_issues","create_issue","list_merge_requests","list_pipelines"])],
+            handler="_custom_gitlab", access={_R, _A}, requires_api_key="gitlab", priority=30),
+    # --- Social ---
+    ToolDef(name="linkedin", description="LinkedIn: post content, read profile, email.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["create_post","get_profile","get_connections"])],
+            handler="_custom_linkedin", access={_R, _A}, requires_api_key="linkedin", priority=30),
+    ToolDef(name="twitter_x", description="X (Twitter): post tweets, read timeline, search.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["create_tweet","read_timeline","search","get_user"])],
+            handler="_custom_twitter_x", access={_R, _A}, requires_api_key="twitter", priority=30),
+    # --- Finance ---
+    ToolDef(name="xero", description="Xero: invoices, contacts, accounts, bank transactions.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_invoices","create_invoice","list_contacts","list_accounts","list_transactions"])],
+            handler="_custom_xero", access={_R, _A}, requires_api_key="xero", priority=30),
+    # --- Microsoft ---
+    ToolDef(name="microsoft", description="Microsoft (Outlook, Teams, OneDrive, SharePoint) — full access.",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["list_emails","send_email","list_events","list_files","send_teams_message"])],
+            handler="_custom_microsoft", access={_R, _A}, requires_api_key="microsoft", priority=30),
+    # --- Video ---
+    ToolDef(name="youtube", description="YouTube: search, channel info, download (download-only — cannot upload or comment).",
+            category=ToolCategory.OAUTH,
+            params=[ToolParam("action", ParamType.STRING, required=True, enum=["search","get_channel","get_video","download"])],
+            handler="_custom_youtube", access={_R, _A}, requires_api_key="youtube", priority=30),
+]
 
 # ── CHAT SKILLS (high-level orchestrator skills for Resonant Chat & AI assistant) ──
 # These are top-level skill entry points that the LLM routes user messages to.
@@ -646,6 +938,58 @@ def get_chat_skill_descriptions() -> Dict[str, str]:
     return descs
 
 
+# ── AUTONOMOUS TOOL BUILDER ──
+# These tools let the orchestrator/agents BUILD new tools at runtime.
+# The platform can extend itself — fully autonomous.
+AUTONOMOUS_BUILDER_TOOLS = [
+    ToolDef(
+        name="auto_build_tool",
+        description="Autonomously design, validate, and register a NEW tool at runtime. "
+                    "Use when no existing tool satisfies the need. The platform builds its own capabilities.",
+        category=ToolCategory.CUSTOM,
+        params=[
+            ToolParam("need_description", ParamType.STRING, "Natural language description of what the tool should do", required=True),
+            ToolParam("auto_execute", ParamType.BOOLEAN, "If true, immediately execute the built tool with execute_params", default=False),
+            ToolParam("execute_params", ParamType.OBJECT, "Parameters to pass if auto_execute is true", default=None),
+        ],
+        handler="_handle_auto_build_tool",
+        access={_R, ToolAccess.AGENT},
+        priority=15,
+    ),
+    ToolDef(
+        name="list_built_tools",
+        description="List all dynamically built tools created by the autonomous builder during this session.",
+        category=ToolCategory.CUSTOM,
+        params=[],
+        handler="_handle_list_built_tools",
+        access={_R, ToolAccess.AGENT},
+        priority=40,
+    ),
+    ToolDef(
+        name="execute_built_tool",
+        description="Execute a dynamically built tool by name with given parameters.",
+        category=ToolCategory.CUSTOM,
+        params=[
+            ToolParam("tool_name", ParamType.STRING, "Name of the dynamically built tool to execute", required=True),
+            ToolParam("params", ParamType.OBJECT, "Parameters to pass to the tool handler", required=True),
+        ],
+        handler="_handle_execute_built_tool",
+        access={_R, ToolAccess.AGENT},
+        priority=20,
+    ),
+    ToolDef(
+        name="check_tool_exists",
+        description="Check if a tool or capability exists in the registry. Returns the tool if found, or suggests building it.",
+        category=ToolCategory.CUSTOM,
+        params=[
+            ToolParam("capability", ParamType.STRING, "Description of the capability to check for", required=True),
+        ],
+        handler="_handle_check_tool_exists",
+        access={_R, ToolAccess.AGENT},
+        priority=35,
+    ),
+]
+
 # ═══════════════════════════════════════════════════════════
 # ALL_TOOLS — single flat list of every tool on the platform
 # ═══════════════════════════════════════════════════════════
@@ -669,6 +1013,18 @@ ALL_TOOLS = (
     + TOOL_MANAGEMENT_TOOLS
     + PLATFORM_API_TOOLS
     + IDE_FILESYSTEM_TOOLS
+    # ── Twin-parity additions ──
+    + SCRAPING_TOOLS
+    + DOCUMENT_TOOLS
+    + ORCHESTRATOR_TOOLS
+    + SMTP_TOOLS
+    + VIDEO_TOOLS
+    + FILE_OPS_TOOLS
+    + STOCK_MARKET_TOOLS
+    + OAUTH_TOOLS
+    # ── Autonomous self-extension ──
+    + AUTONOMOUS_BUILDER_TOOLS
+    # ── Chat skills (must be last — detection layer) ──
     + CHAT_SKILL_TOOLS
 )
 

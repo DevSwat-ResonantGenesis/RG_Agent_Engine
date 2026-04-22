@@ -3,7 +3,8 @@ Unified Tool Registry
 =====================
 
 ONE canonical ToolDef format that replaces:
-  - TOOL_DEFS dict       (custom_tools.py)
+  - TOOL_DEFS dict       (routers_agentic_chat.py)
+  - GUEST_TOOLS dict     (routers_public_chat.py)
   - executor.tool_handlers dict (executor.py)
   - ToolDef[] TypeScript  (toolDefinitions.ts)
 
@@ -50,6 +51,11 @@ class ToolCategory(str, Enum):
     CHECKPOINTS = "checkpoints"
     PLANNING = "planning"
     CUSTOM = "custom"
+    SCRAPING = "scraping"
+    DOCUMENTS = "documents"
+    BILLING = "billing"
+    ORCHESTRATOR = "orchestrator"
+    OAUTH = "oauth"
 
 
 class ParamType(str, Enum):
@@ -277,15 +283,14 @@ class ToolRegistry:
         categories: Optional[List[ToolCategory]] = None,
         names: Optional[List[str]] = None,
     ) -> List[ToolDef]:
-        """Get tools filtered by categories or explicit names.
-        
-        NOTE: access filtering is DISABLED — ALL tools are available
-        to ALL systems (agents, chat, IDE, guest). The platform provides
-        full tool access; security is enforced at the sandbox layer.
-        """
+        """Get tools filtered by access level, categories, or explicit names."""
         tools = list(self._tools.values())
 
-        # access parameter intentionally ignored — all tools available everywhere
+        if access:
+            tools = [
+                t for t in tools
+                if access in t.access or ToolAccess.ALL in t.access
+            ]
 
         if categories:
             cat_set = set(categories)
@@ -360,7 +365,7 @@ class ToolRegistry:
         access: Set[ToolAccess] = None,
     ) -> "ToolRegistry":
         """
-        Import from the old TOOL_DEFS dict format.
+        Import from the old TOOL_DEFS dict format used in routers_agentic_chat.py.
 
         TOOL_DEFS = {
             "web_search": {
@@ -408,7 +413,7 @@ class ToolRegistry:
         cls,
         guest_tools: Dict[str, Dict[str, Any]],
     ) -> "ToolRegistry":
-        """Import from GUEST_TOOLS dict format."""
+        """Import from GUEST_TOOLS dict format (routers_public_chat.py)."""
         return cls.from_tool_defs_dict(guest_tools, access={ToolAccess.GUEST})
 
     def merge(self, other: "ToolRegistry") -> None:

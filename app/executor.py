@@ -35,6 +35,7 @@ from .policy_engine import (
 from .learning_loop import get_learning_loop
 from .agent_wallet import get_wallet_manager
 from .value_drift_monitor import get_drift_manager
+from .tool_classifier import tool_classifier
 
 # Execution Gate for dual-mode autonomy
 try:
@@ -181,8 +182,7 @@ Context:
 Previous steps:
 {history}
 
-You have access to 159+ tools and 44 platform services (560+ APIs). Call any by name.
-Tools: web_search, fetch_url, execute_code, generate_image, gmail_send, slack_send, http_request, dev_tool, memory_read, memory_write, create_rabbit_post, google_calendar, figma, etc.
+{tools_section}
 APIs: Use discover_services(category="ai|core|agents|community|developer|integrations|blockchain|storage") to find services.
       Use platform_api(service="name", endpoint="/path", method="GET|POST", body={{...}}) to call any service API.
       Use discover_api(service="name") to list a service's endpoints.
@@ -2734,6 +2734,24 @@ Respond in JSON:
             logger.warning(f"[BYOK-EXEC] Failed to fetch keys for {user_id}: {e}")
         return {}
 
+    def _build_tools_section(self, predicted_tools: List[str]) -> str:
+        """Build the tools section for EXECUTION_FRAME from classifier predictions."""
+        if not predicted_tools:
+            # Fallback: list handler_map keys (legacy behavior)
+            all_names = sorted(self._handler_map.keys())
+            return (
+                f"You have access to {len(all_names)}+ tools and 44 platform services (560+ APIs). Call any by name.\n"
+                f"Tools: {', '.join(all_names[:20])}, etc."
+            )
+        tool_names = [t for t in predicted_tools if t in self._handler_map]
+        if not tool_names:
+            tool_names = list(self._handler_map.keys())[:15]
+        return (
+            f"You have access to {len(self._handler_map)}+ tools. Best matches for this goal:\n"
+            f"Tools: {', '.join(tool_names)}\n"
+            f"You may also call any other tool by exact name (discover_services, platform_api, etc.)."
+        )
+
     async def _get_next_action(
         self,
         agent: AgentDefinition,
@@ -2747,11 +2765,39 @@ Respond in JSON:
         context_str = json.dumps(context, indent=2)
 
         system_prompt = agent.system_prompt or self.DEFAULT_SYSTEM_PROMPT
-        
+
+        # === NEURAL TOOL CLASSIFIER: predict relevant tools for this goal ===
+        predicted_tool_names = []
+        try:
+            # Determine enabled tools based on agent config
+            enabled_tool_ids = None  # None = all tools
+            _tool_mode = getattr(agent, "tool_mode", "smart") or "smart"
+            _agent_tools = getattr(agent, "tools", None)
+
+            if _tool_mode == "manual" and _agent_tools:
+                enabled_tool_ids = set(_agent_tools)
+
+            top_tools = await tool_classifier.predict_top_n(
+                goal=goal,
+                n=12,
+                enabled_tool_ids=enabled_tool_ids,
+                user_id=str(agent.user_id) if agent.user_id else None,
+            )
+            predicted_tool_names = [t[0] for t in top_tools]
+            logger.info(
+                f"[TOOL_CLASSIFIER] Predicted {len(predicted_tool_names)} tools for goal: "
+                f"{predicted_tool_names[:5]}... mode={_tool_mode}"
+            )
+        except Exception as e:
+            logger.warning(f"[TOOL_CLASSIFIER] Prediction failed (using fallback): {e}")
+
+        tools_section = self._build_tools_section(predicted_tool_names)
+
         prompt = self.EXECUTION_FRAME.format(
             goal=goal,
             context=context_str,
             history=history_str,
+            tools_section=tools_section,
         )
 
         # Phase 2.4: Inject learning recommendations into prompt

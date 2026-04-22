@@ -124,6 +124,16 @@ for _name, _rtr in [
         app.include_router(_rtr)
         logger.info(f"Router wired: {_name}")
 
+# Startup hook: preload neural tool classifier (sentence-transformer + MLP)
+@app.on_event("startup")
+async def preload_classifier():
+    try:
+        from .tool_classifier import preload_tool_classifier
+        await preload_tool_classifier()
+    except Exception as e:
+        logger.warning(f"[STARTUP] Tool classifier preload failed (non-fatal): {e}")
+
+
 # Startup hook: mark orphaned "running" sessions as failed (they died with the previous process)
 @app.on_event("startup")
 async def cleanup_orphaned_sessions():
