@@ -241,6 +241,60 @@ async def _fire_session_inner(*, agent_id: str, goal: str, context: dict,
     except Exception as e:
         logger.error(f"[SCHEDULER] _fire_session failed for {source}: {e}")
 
+    # Update success_count / failure_count on the schedule row
+    await _update_schedule_counts(source)
+
+
+async def _update_schedule_counts(source: str) -> None:
+    """Increment success_count or failure_count on the schedule/trigger row.
+
+    `source` is e.g. "schedule:<uuid>" or "workflow_trigger:<uuid>".
+    We look at the LAST session fired for that agent to determine outcome.
+    Since _fire_session_inner already ran run_loop, the session row has its
+    final status by now (completed / failed).
+    """
+    try:
+        parts = source.split(":", 1)
+        if len(parts) != 2:
+            return
+        source_type, source_id = parts
+
+        async with async_session() as db:
+            if source_type == "schedule":
+                # Find the most recent session for this schedule's agent
+                row = await db.execute(
+                    text("""
+                        SELECT s.status
+                        FROM agent_sessions s
+                        JOIN agent_schedules sc ON sc.agent_id = s.agent_id
+                        WHERE sc.id = :sid
+                        ORDER BY s.created_at DESC
+                        LIMIT 1
+                    """),
+                    {"sid": source_id},
+                )
+                status_row = row.fetchone()
+                if status_row:
+                    final_status = status_row[0]
+                    if final_status == "completed":
+                        await db.execute(
+                            text("UPDATE agent_schedules SET success_count = success_count + 1 WHERE id = :sid"),
+                            {"sid": source_id},
+                        )
+                    elif final_status == "failed":
+                        await db.execute(
+                            text("UPDATE agent_schedules SET failure_count = failure_count + 1 WHERE id = :sid"),
+                            {"sid": source_id},
+                        )
+                    await db.commit()
+
+            elif source_type == "workflow_trigger":
+                # workflow_triggers don't have success/failure columns yet — skip
+                pass
+
+    except Exception as e:
+        logger.warning(f"[SCHEDULER] Failed to update counts for {source}: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Daemon lifecycle
