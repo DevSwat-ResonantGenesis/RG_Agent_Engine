@@ -302,6 +302,8 @@ Respond in JSON:
             "figma": self._tool_figma,
             "google_calendar": self._tool_google_calendar,
             "google_drive": self._tool_google_drive,
+            "google_sheets": self._tool_google_sheets,
+            "google_docs": self._tool_google_docs,
             "sigma": self._tool_sigma,
             # === UNIFIED API CATALOG: Call any platform service API ===
             "platform_api": self._tool_platform_api,
@@ -1385,6 +1387,163 @@ Respond in JSON:
             return {"error": f"Google Drive API error: {e.response.text[:200]}"}
         except Exception as e:
             return {"error": f"Google Drive request failed: {str(e)[:300]}"}
+
+    async def _tool_google_sheets(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Google Sheets: create, read, append, update spreadsheets."""
+        action = (tool_input or {}).get("action", "read").lower()
+
+        api_key, err = await self._resolve_google_token(session, "google-drive")
+        if err:
+            api_key, err = await self._resolve_google_token(session, "google")
+        if err:
+            return err
+
+        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                if action == "create":
+                    title = (tool_input or {}).get("title", "New Spreadsheet")
+                    sheet_headers = (tool_input or {}).get("headers", [])
+                    body = {"properties": {"title": title}}
+                    if sheet_headers:
+                        body["sheets"] = [{"data": [{"rowData": [{"values": [{"userEnteredValue": {"stringValue": h}} for h in sheet_headers]}]}]}]
+                    resp = await client.post(SHEETS_API, headers={**headers, "Content-Type": "application/json"}, json=body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return {"success": True, "action": "create", "spreadsheet_id": data["spreadsheetId"],
+                            "title": title, "url": data.get("spreadsheetUrl", "")}
+
+                elif action == "append":
+                    sid = (tool_input or {}).get("spreadsheet_id", "")
+                    if not sid:
+                        return {"error": "Missing 'spreadsheet_id'"}
+                    tab = (tool_input or {}).get("tab_name", "Sheet1")
+                    rows = (tool_input or {}).get("rows", [])
+                    if not rows:
+                        return {"error": "Missing 'rows' — provide array of row arrays"}
+                    rng = f"{tab}!A1"
+                    resp = await client.post(
+                        f"{SHEETS_API}/{sid}/values/{rng}:append",
+                        headers={**headers, "Content-Type": "application/json"},
+                        params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+                        json={"values": rows},
+                    )
+                    resp.raise_for_status()
+                    updates = resp.json().get("updates", {})
+                    return {"success": True, "action": "append", "updated_rows": updates.get("updatedRows", 0),
+                            "updated_range": updates.get("updatedRange", "")}
+
+                elif action == "update":
+                    sid = (tool_input or {}).get("spreadsheet_id", "")
+                    rng = (tool_input or {}).get("range", "Sheet1!A1")
+                    rows = (tool_input or {}).get("rows", [])
+                    if not sid or not rows:
+                        return {"error": "Missing 'spreadsheet_id' and/or 'rows'"}
+                    resp = await client.put(
+                        f"{SHEETS_API}/{sid}/values/{rng}",
+                        headers={**headers, "Content-Type": "application/json"},
+                        params={"valueInputOption": "USER_ENTERED"},
+                        json={"values": rows},
+                    )
+                    resp.raise_for_status()
+                    return {"success": True, "action": "update", "updated_cells": resp.json().get("updatedCells", 0)}
+
+                elif action == "list_sheets":
+                    sid = (tool_input or {}).get("spreadsheet_id", "")
+                    if not sid:
+                        return {"error": "Missing 'spreadsheet_id'"}
+                    resp = await client.get(f"{SHEETS_API}/{sid}", headers=headers, params={"fields": "sheets.properties"})
+                    resp.raise_for_status()
+                    sheets = resp.json().get("sheets", [])
+                    return {"success": True, "action": "list_sheets",
+                            "sheets": [{"title": s.get("properties", {}).get("title"), "index": s.get("properties", {}).get("index")} for s in sheets]}
+
+                else:
+                    sid = (tool_input or {}).get("spreadsheet_id", "")
+                    if not sid:
+                        return {"error": "Missing 'spreadsheet_id'"}
+                    tab = (tool_input or {}).get("tab_name", "Sheet1")
+                    rng = (tool_input or {}).get("range", f"{tab}!A1:Z1000")
+                    resp = await client.get(f"{SHEETS_API}/{sid}/values/{rng}", headers=headers)
+                    resp.raise_for_status()
+                    values = resp.json().get("values", [])
+                    return {"success": True, "action": "read", "rows": len(values),
+                            "data": values[:100]}
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (401, 403):
+                return {"error": "Google Sheets access denied — token may be expired. Reconnect in Settings > Connect Profiles."}
+            return {"error": f"Sheets API error: {e.response.text[:200]}"}
+        except Exception as e:
+            return {"error": f"Google Sheets request failed: {str(e)[:300]}"}
+
+    async def _tool_google_docs(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Google Docs: create, read, append documents."""
+        action = (tool_input or {}).get("action", "read").lower()
+
+        api_key, err = await self._resolve_google_token(session, "google-drive")
+        if err:
+            api_key, err = await self._resolve_google_token(session, "google")
+        if err:
+            return err
+
+        headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+        DOCS_API = "https://docs.googleapis.com/v1/documents"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                if action == "create":
+                    title = (tool_input or {}).get("title", "New Document")
+                    resp = await client.post(DOCS_API, headers={**headers, "Content-Type": "application/json"},
+                                             json={"title": title})
+                    resp.raise_for_status()
+                    doc = resp.json()
+                    doc_id = doc["documentId"]
+                    content = (tool_input or {}).get("content", "")
+                    if content:
+                        await client.post(f"{DOCS_API}/{doc_id}:batchUpdate",
+                                          headers={**headers, "Content-Type": "application/json"},
+                                          json={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]})
+                    return {"success": True, "action": "create", "document_id": doc_id, "title": title,
+                            "url": f"https://docs.google.com/document/d/{doc_id}/edit"}
+
+                elif action == "append":
+                    doc_id = (tool_input or {}).get("document_id", "")
+                    content = (tool_input or {}).get("content", "")
+                    if not doc_id or not content:
+                        return {"error": "Missing 'document_id' and/or 'content'"}
+                    doc_resp = await client.get(f"{DOCS_API}/{doc_id}", headers=headers)
+                    doc_resp.raise_for_status()
+                    end_idx = doc_resp.json().get("body", {}).get("content", [{}])[-1].get("endIndex", 1) - 1
+                    end_idx = max(end_idx, 1)
+                    resp = await client.post(f"{DOCS_API}/{doc_id}:batchUpdate",
+                                             headers={**headers, "Content-Type": "application/json"},
+                                             json={"requests": [{"insertText": {"location": {"index": end_idx}, "text": "\n" + content}}]})
+                    resp.raise_for_status()
+                    return {"success": True, "action": "append", "document_id": doc_id}
+
+                else:
+                    doc_id = (tool_input or {}).get("document_id", "")
+                    if not doc_id:
+                        return {"error": "Missing 'document_id'"}
+                    resp = await client.get(f"{DOCS_API}/{doc_id}", headers=headers)
+                    resp.raise_for_status()
+                    doc = resp.json()
+                    text_parts = []
+                    for el in doc.get("body", {}).get("content", []):
+                        for pe in el.get("paragraph", {}).get("elements", []):
+                            text_parts.append(pe.get("textRun", {}).get("content", ""))
+                    return {"success": True, "action": "read", "title": doc.get("title", ""),
+                            "content": "".join(text_parts)[:10000]}
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (401, 403):
+                return {"error": "Google Docs access denied — token may be expired. Reconnect in Settings > Connect Profiles."}
+            return {"error": f"Docs API error: {e.response.text[:200]}"}
+        except Exception as e:
+            return {"error": f"Google Docs request failed: {str(e)[:300]}"}
 
     async def _tool_sigma(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Access Sigma Computing: list workbooks or get workbook details."""
