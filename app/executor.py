@@ -709,29 +709,73 @@ Respond in JSON:
         return await self._tool_fetch_url({"url": url}, session=session)
 
     async def _tool_deep_research(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """deep_research: accepts query/topic/subject/url — searches web, optionally fetches page."""
+        """Deep research: searches web, fetches multiple pages, synthesizes comprehensive report."""
         inp = tool_input or {}
         query = inp.get("query") or inp.get("topic") or inp.get("subject") or inp.get("search") or inp.get("question")
         url = inp.get("url") or inp.get("page") or inp.get("link")
+        max_pages = inp.get("max_pages", 3)
+        try:
+            max_pages = int(max_pages)
+        except Exception:
+            max_pages = 3
+        max_pages = max(1, min(max_pages, 10))
 
-        results = {}
+        if not query and not url:
+            return {"error": "Provide 'query' and/or 'url'. Example: {\"query\": \"topic to research\"}"}
 
-        # If a URL was provided, fetch it
-        if url and isinstance(url, str):
-            page_data = await self._tool_fetch_url({"url": url}, session=session)
-            results["page_content"] = page_data
+        results = {
+            "query": query or url,
+            "search_results": None,
+            "pages_fetched": [],
+            "synthesis": "",
+        }
 
-        # If a query was provided (or derive from URL), do web search
-        if query and isinstance(query, str):
+        # Step 1: Search for the topic
+        if query:
             search_data = await self._tool_web_search({"query": query}, session=session)
             results["search_results"] = search_data
-        elif url and not query:
-            # No explicit query — derive one from the URL
+        elif url:
+            # If only URL provided, search for it to find related content
             search_data = await self._tool_web_search({"query": url}, session=session)
             results["search_results"] = search_data
 
-        if not results:
-            return {"error": "Provide 'query' and/or 'url'. Example: {\"query\": \"topic to research\"}"}
+        # Step 2: Fetch top pages from search results
+        search_results_list = results["search_results"].get("results", []) if results["search_results"] else []
+        if url:
+            # Add the explicitly provided URL first
+            page_data = await self._tool_fetch_url({"url": url}, session=session)
+            if not page_data.get("error"):
+                results["pages_fetched"].append({
+                    "url": url,
+                    "title": "Provided URL",
+                    "content": page_data.get("text", "")[:10000],
+                })
+
+        # Fetch top N pages from search results
+        for i, result in enumerate(search_results_list[:max_pages]):
+            page_url = result.get("url")
+            if not page_url:
+                continue
+            try:
+                page_data = await self._tool_fetch_url({"url": page_url}, session=session)
+                if not page_data.get("error"):
+                    results["pages_fetched"].append({
+                        "url": page_url,
+                        "title": result.get("title", "Untitled"),
+                        "content": page_data.get("text", "")[:10000],
+                    })
+            except Exception:
+                continue
+
+        # Step 3: Synthesize findings
+        if results["pages_fetched"]:
+            all_content = "\n\n".join([
+                f"Source: {p['url']}\nTitle: {p['title']}\nContent: {p['content']}"
+                for p in results["pages_fetched"]
+            ])
+            results["synthesis"] = f"Research completed. Analyzed {len(results['pages_fetched'])} sources. Key content:\n\n{all_content[:15000]}"
+        else:
+            results["synthesis"] = "No pages could be fetched. Check if URLs are accessible or blocked."
 
         return results
 
@@ -3400,16 +3444,82 @@ Respond in JSON:
         return await self._tool_web_search({"query": f"images of: {q}"}, session=session)
 
     async def _tool_youtube_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Search YouTube for videos."""
         q = (tool_input or {}).get("query", "")
-        return await self._tool_web_search({"query": f"site:youtube.com {q}"}, session=session)
+        if not q:
+            return {"error": "Missing 'query' parameter"}
+        
+        results = await self._tool_web_search({"query": f"site:youtube.com {q}"}, session=session)
+        if results.get("error"):
+            return {"error": f"YouTube search failed: {results.get('error')}"}
+        
+        # Format results specifically for YouTube
+        formatted_results = []
+        for r in results.get("results", []):
+            if "youtube.com" in r.get("url", ""):
+                formatted_results.append({
+                    "title": r.get("title"),
+                    "url": r.get("url"),
+                    "snippet": r.get("snippet", "")
+                })
+        
+        return {
+            "query": q,
+            "source": "youtube",
+            "results": formatted_results[:10]
+        }
 
     async def _tool_reddit_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Search Reddit for posts and discussions."""
         q = (tool_input or {}).get("query", "")
-        return await self._tool_web_search({"query": f"site:reddit.com {q}"}, session=session)
+        if not q:
+            return {"error": "Missing 'query' parameter"}
+        
+        results = await self._tool_web_search({"query": f"site:reddit.com {q}"}, session=session)
+        if results.get("error"):
+            return {"error": f"Reddit search failed: {results.get('error')}"}
+        
+        # Format results specifically for Reddit
+        formatted_results = []
+        for r in results.get("results", []):
+            if "reddit.com" in r.get("url", ""):
+                formatted_results.append({
+                    "title": r.get("title"),
+                    "url": r.get("url"),
+                    "snippet": r.get("snippet", "")
+                })
+        
+        return {
+            "query": q,
+            "source": "reddit",
+            "results": formatted_results[:10]
+        }
 
     async def _tool_wikipedia(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Search Wikipedia for encyclopedia articles."""
         q = (tool_input or {}).get("query") or (tool_input or {}).get("topic", "")
-        return await self._tool_web_search({"query": f"site:wikipedia.org {q}"}, session=session)
+        if not q:
+            return {"error": "Missing 'query' or 'topic' parameter"}
+        
+        results = await self._tool_web_search({"query": f"site:wikipedia.org {q}"}, session=session)
+        if results.get("error"):
+            return {"error": f"Wikipedia search failed: {results.get('error')}"}
+        
+        # Format results specifically for Wikipedia
+        formatted_results = []
+        for r in results.get("results", []):
+            if "wikipedia.org" in r.get("url", ""):
+                formatted_results.append({
+                    "title": r.get("title"),
+                    "url": r.get("url"),
+                    "snippet": r.get("snippet", "")
+                })
+        
+        return {
+            "query": q,
+            "source": "wikipedia",
+            "results": formatted_results[:5]
+        }
 
     async def _tool_weather(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
         loc = (tool_input or {}).get("location") or (tool_input or {}).get("query", "")
