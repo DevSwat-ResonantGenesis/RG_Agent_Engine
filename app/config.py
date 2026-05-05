@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     SAFETY_TIMEOUT_SECONDS: int = 300
     
     # Agent defaults
-    DEFAULT_MODEL: str = "gpt-4o"
+    DEFAULT_MODEL: str = "google/gemini-3-flash-preview"
 
     SANDBOX_RUNNER_URL: str = os.getenv(
         "SANDBOX_RUNNER_URL",

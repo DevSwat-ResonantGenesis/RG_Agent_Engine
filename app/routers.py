@@ -377,7 +377,7 @@ class AgentCreate(BaseModel):
     description: Optional[str] = None
     system_prompt: Optional[str] = None
     provider: Optional[str] = None  # e.g. openai, anthropic, groq, google, local
-    model: str = "gpt-4-turbo-preview"
+    model: str = "google/gemini-3-flash-preview"
     temperature: float = 0.7
     max_tokens: int = 16384
     tool_mode: Optional[str] = "smart"  # smart = all tools auto, manual = only selected tools
@@ -2747,10 +2747,15 @@ class ProviderCatalogProvider(BaseModel):
     name: str
     available: bool
     has_user_key: Optional[bool] = None
+    has_system_key: Optional[bool] = None
     uses_credits: Optional[bool] = None
     model: Optional[str] = None
+    models: Optional[List[str]] = None
     description: Optional[str] = None
     capabilities: Optional[List[str]] = None
+    provider_key: Optional[str] = None
+    supports_byok: Optional[bool] = None
+    model_categories: Optional[Dict[str, Any]] = None
 
 
 class ProvidersCatalogResponse(BaseModel):
@@ -2760,24 +2765,137 @@ class ProvidersCatalogResponse(BaseModel):
     message: Optional[str] = None
 
 
+# Provider capabilities and display names (same as IDE extension)
+_PROVIDER_DISPLAY_NAMES: Dict[str, str] = {
+    "tokenrouter": "TokenRouter (72 Models)",
+    "openai": "ChatGPT",
+    "anthropic": "Claude",
+    "groq": "Groq",
+    "google": "Gemini",
+    "deepseek": "DeepSeek",
+    "mistral": "Mistral",
+    "together": "Together AI",
+    "perplexity": "Perplexity",
+    "fireworks": "Fireworks AI",
+    "openrouter": "OpenRouter (100+ models)",
+    "cohere": "Cohere",
+}
+
+_PROVIDER_CAPABILITIES: Dict[str, List[str]] = {
+    "tokenrouter": ["chat", "coding", "vision", "tools", "image", "video", "audio"],
+    "openai": ["chat", "coding", "vision", "image"],
+    "anthropic": ["chat", "coding", "vision"],
+    "groq": ["chat", "coding"],
+    "google": ["chat", "coding", "vision"],
+    "deepseek": ["chat", "coding", "reasoning"],
+    "mistral": ["chat", "coding"],
+    "together": ["chat", "coding"],
+    "perplexity": ["chat", "reasoning"],
+    "fireworks": ["chat", "coding"],
+    "openrouter": ["chat", "coding", "vision"],
+    "cohere": ["chat"],
+}
+
+
 @router.get("/providers")
 async def list_provider_catalog(request: Request):
-    user_id = request.headers.get("x-user-id")
-    headers = {"x-user-id": user_id} if user_id else {}
+    """Return live provider catalog directly from rg_llm.BUILTIN_PROVIDERS.
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{LLM_SERVICE_URL}/llm/providers", headers=headers)
-        if resp.status_code == 200:
-            return resp.json() if resp.content else {}
-    except Exception as e:
-        logger.warning(f"Failed to fetch provider catalog from llm_service: {e}")
+    No longer proxies to llm_service — uses the same canonical source as IDE.
+    Includes BYOK key resolution and latency-free availability checks.
+    """
+    from rg_llm.providers import BUILTIN_PROVIDERS, DEFAULT_FALLBACK_ORDER
+
+    user_id = request.headers.get("x-user-id") or ""
+    auth_header = request.headers.get("authorization", "")
+    auth_token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+
+    # Fetch user BYOK keys
+    user_keys: Dict[str, str] = {}
+    if user_id or auth_token:
+        try:
+            internal_key = os.getenv("AUTH_INTERNAL_SERVICE_KEY") or os.getenv("INTERNAL_SERVICE_KEY", "")
+            auth_url = os.getenv("AUTH_URL", "http://auth_service:8000")
+            headers = {"x-internal-service-key": internal_key} if internal_key else {}
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{auth_url}/auth/internal/user-api-keys/{user_id}",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    for entry in resp.json().get("keys", []):
+                        prov = entry.get("provider", "")
+                        key = entry.get("api_key", "")
+                        if prov and key:
+                            user_keys[prov] = key
+        except Exception as e:
+            logger.debug(f"BYOK fetch failed: {e}")
+
+    providers = []
+    for pid in DEFAULT_FALLBACK_ORDER:
+        cfg = BUILTIN_PROVIDERS.get(pid)
+        if not cfg:
+            continue
+
+        # Check availability: system key OR user BYOK key
+        env_names = [cfg.env_key_name] if cfg.env_key_name else []
+        sys_key = None
+        for env_name in env_names:
+            val = os.getenv(env_name, "")
+            if val:
+                sys_key = val.split(",")[0].strip()
+                break
+
+        has_user_key = bool(user_keys.get(pid))
+        has_system_key = bool(sys_key)
+        available = has_system_key or has_user_key
+
+        model_cats = None
+        if pid == "tokenrouter":
+            model_cats = {"text": 55, "image": 7, "video": 7, "audio": 2}
+
+        providers.append({
+            "id": pid,
+            "provider_key": pid,
+            "name": _PROVIDER_DISPLAY_NAMES.get(pid, cfg.name),
+            "available": available,
+            "has_user_key": has_user_key,
+            "has_system_key": has_system_key,
+            "uses_credits": has_system_key and not has_user_key,
+            "model": cfg.default_model,
+            "models": list(cfg.models),
+            "description": f"{cfg.default_model} via {cfg.name}",
+            "capabilities": _PROVIDER_CAPABILITIES.get(pid, ["chat"]),
+            "supports_byok": True,
+            "model_categories": model_cats,
+        })
+
+    # Also add providers the user has BYOK keys for but aren't in BUILTIN
+    existing_ids = {p["id"] for p in providers}
+    for byok_pid in user_keys:
+        if byok_pid not in existing_ids:
+            cfg = BUILTIN_PROVIDERS.get(byok_pid)
+            if cfg:
+                providers.append({
+                    "id": byok_pid,
+                    "provider_key": byok_pid,
+                    "name": _PROVIDER_DISPLAY_NAMES.get(byok_pid, cfg.name),
+                    "available": True,
+                    "has_user_key": True,
+                    "has_system_key": False,
+                    "uses_credits": False,
+                    "model": cfg.default_model,
+                    "models": list(cfg.models),
+                    "description": f"{cfg.default_model} via {cfg.name} (BYOK)",
+                    "capabilities": _PROVIDER_CAPABILITIES.get(byok_pid, ["chat"]),
+                    "supports_byok": True,
+                    "model_categories": None,
+                })
 
     return {
-        "providers": [],
-        "default": None,
-        "fallback_chain": [],
-        "message": "Provider catalog unavailable",
+        "providers": providers,
+        "default": "tokenrouter" if any(p["id"] == "tokenrouter" and p["available"] for p in providers) else (providers[0]["id"] if providers else None),
+        "fallback_chain": [p["id"] for p in providers if p["available"]],
     }
 
 

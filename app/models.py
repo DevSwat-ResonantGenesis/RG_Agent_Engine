@@ -25,7 +25,7 @@ class AgentDefinition(Base):
     
     # Model configuration
     provider = Column(String(64), nullable=True)  # e.g. openai, anthropic, groq, google, local
-    model = Column(String(64), default="gpt-4-turbo-preview")
+    model = Column(String(64), default="google/gemini-3-flash-preview")
     temperature = Column(Float, default=0.7)
     max_tokens = Column(Integer, default=128000)
     

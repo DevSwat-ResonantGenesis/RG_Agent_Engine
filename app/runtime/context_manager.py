@@ -26,18 +26,42 @@ except ImportError:
     logger.warning("tiktoken not available — using character-based token estimation")
 
 # Token limits per model (input side, leaving room for output)
+# Includes both direct model names and TokenRouter prefixed names
 MODEL_LIMITS: Dict[str, int] = {
-    "gpt-4o": 120_000,
-    "gpt-4o-mini": 120_000,
-    "gpt-4-turbo": 120_000,
-    "o1-mini": 120_000,
-    "claude-3-5-sonnet-20241022": 190_000,
-    "claude-sonnet-4-20250514": 190_000,
-    "claude-3-haiku-20240307": 190_000,
-    "claude-3-opus-20240229": 190_000,
-    "llama-3.3-70b-versatile": 120_000,
-    "llama-3.1-8b-instant": 120_000,
-    "mixtral-8x7b-32768": 30_000,
+    # TokenRouter models (prefixed)
+    "anthropic/claude-opus-4.7": 200_000,
+    "anthropic/claude-opus-4.6": 200_000,
+    "anthropic/claude-opus-4.5": 200_000,
+    "anthropic/claude-sonnet-4.6": 200_000,
+    "anthropic/claude-sonnet-4.5": 200_000,
+    "anthropic/claude-sonnet-4": 200_000,
+    "anthropic/claude-haiku-4.5": 200_000,
+    "openai/gpt-5.5": 128_000,
+    "openai/gpt-5.4": 128_000,
+    "openai/gpt-5.2": 128_000,
+    "openai/gpt-5-mini": 128_000,
+    "openai/gpt-4o-mini": 128_000,
+    "openai/gpt-5.3-codex": 128_000,
+    "openai/gpt-5.1-codex-max": 128_000,
+    "x-ai/grok-4.3": 128_000,
+    "google/gemini-3.1-pro-preview": 1_000_000,
+    "google/gemini-3-flash-preview": 1_000_000,
+    "deepseek/deepseek-v4-pro": 128_000,
+    "deepseek/deepseek-v4-flash": 128_000,
+    "qwen/qwen3.6-plus": 128_000,
+    "qwen/qwen3.5-flash": 128_000,
+    # Direct provider models (legacy/BYOK)
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "o1-mini": 128_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-3-haiku-20240307": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    "llama-3.3-70b-versatile": 128_000,
+    "llama-3.1-8b-instant": 128_000,
+    "mixtral-8x7b-32768": 32_000,
 }
 
 OUTPUT_RESERVE = 4096  # Tokens reserved for model response
