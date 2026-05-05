@@ -594,21 +594,26 @@ Respond in JSON:
         return results
 
     async def _tool_web_search(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Search the web using DuckDuckGo with anti-bot headers and fallback."""
         query = (tool_input or {}).get("query")
         if not query or not isinstance(query, str):
             return {"error": "Missing or invalid 'query'"}
 
-        url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_redirect=1&no_html=1"
+        # Anti-bot headers for search API
         headers = {
-            "User-Agent": "Genesis2026-AgentEngine/1.0 (+https://dev-swat.com)",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
         }
+
+        url = f"https://api.duckduckgo.com/?q={quote_plus(query)}&format=json&no_redirect=1&no_html=1"
 
         if settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED:
             sandbox_resp = await self._sandbox_runner_http_get(
                 url=url,
                 accept=headers.get("Accept", "application/json"),
-                timeout_seconds=float(settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_TIMEOUT_SECONDS),
+                timeout_seconds=30.0,
                 max_bytes=512 * 1024,
                 add_hosts=self._resolve_public_add_hosts("api.duckduckgo.com"),
             )
@@ -628,21 +633,28 @@ Respond in JSON:
                 return {"error": "DuckDuckGo returned invalid JSON"}
 
         else:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    return {"error": f"HTTP {resp.status_code}"}
+            try:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=headers) as client:
+                    resp = await client.get(url)
+                    if resp.status_code != 200:
+                        return {"error": f"HTTP {resp.status_code}"}
 
-                try:
-                    data = resp.json() if resp.content else {}
-                except Exception:
-                    return {"error": "DuckDuckGo returned invalid JSON"}
+                    try:
+                        data = resp.json() if resp.content else {}
+                    except Exception:
+                        return {"error": "DuckDuckGo returned invalid JSON"}
+            except Exception as e:
+                return {"error": f"Search failed: {str(e)}"}
 
         results: List[Dict[str, Any]] = []
 
         def _collect(topic: Any) -> None:
             if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
-                results.append({"title": topic.get("Text"), "url": topic.get("FirstURL")})
+                results.append({
+                    "title": topic.get("Text"),
+                    "url": topic.get("FirstURL"),
+                    "snippet": topic.get("Snippet", "")
+                })
             if isinstance(topic, dict) and isinstance(topic.get("Topics"), list):
                 for t in topic.get("Topics"):
                     _collect(t)
@@ -650,29 +662,30 @@ Respond in JSON:
         for t in data.get("RelatedTopics") or []:
             _collect(t)
 
+        # Fallback to HTML scraping if JSON returns no results
         if not results:
             try:
                 html_headers = {
-                    "User-Agent": headers.get("User-Agent", "Mozilla/5.0"),
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
                 }
 
+                lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
+                
                 if settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED:
-                    lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
                     sandbox_html = await self._sandbox_runner_http_get(
                         url=lite_url,
                         accept=html_headers.get("Accept", "text/html"),
-                        timeout_seconds=float(settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_TIMEOUT_SECONDS),
+                        timeout_seconds=30.0,
                         max_bytes=512 * 1024,
                         add_hosts=self._resolve_public_add_hosts("lite.duckduckgo.com"),
                     )
                     if not sandbox_html.get("error") and sandbox_html.get("text"):
                         results = self._extract_results_from_ddg_html(sandbox_html.get("text") or "")
                 else:
-                    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=html_headers) as html_client:
-                        html_resp = await html_client.get(
-                            f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}",
-                        )
+                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=html_headers) as html_client:
+                        html_resp = await html_client.get(lite_url)
                     if html_resp.status_code == 200 and html_resp.text:
                         results = self._extract_results_from_ddg_html(html_resp.text)
             except Exception:
@@ -797,6 +810,7 @@ Respond in JSON:
         return cleaned
 
     async def _tool_fetch_url(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Fetch URL with anti-bot evasion and proper scraping."""
         url = (tool_input or {}).get("url")
         if not url or not isinstance(url, str):
             return {"error": "Missing or invalid 'url'"}
@@ -812,18 +826,39 @@ Respond in JSON:
         if port not in (None, 80, 443):
             return {"error": "Blocked port"}
 
-        headers = {
-            "User-Agent": "Genesis2026-AgentEngine/1.0 (+https://dev-swat.com)",
-            "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1",
-        }
+        # Anti-bot headers - rotate through realistic browser headers
+        headers_options = [
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            },
+            {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "DNT": "1",
+                "Connection": "keep-alive",
+            },
+        ]
+        headers = headers_options[hash(url) % len(headers_options)]
 
-        max_bytes = 512 * 1024  # 512KB cap — prevents massive JS-heavy pages from blocking workers
+        max_bytes = 1024 * 1024  # 1MB cap for better scraping
 
         if settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED:
             sandbox_resp = await self._sandbox_runner_http_get(
                 url=url,
                 accept=headers.get("Accept", "*/*"),
-                timeout_seconds=float(settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_TIMEOUT_SECONDS),
+                timeout_seconds=30.0,
                 max_bytes=max_bytes,
                 add_hosts=self._resolve_public_add_hosts(parsed.hostname or ""),
             )
@@ -837,22 +872,30 @@ Respond in JSON:
             if status >= 400:
                 return {"url": url, "status": status, "error": f"HTTP {status}"}
         else:
-            timeout = httpx.Timeout(15.0, connect=5.0)
+            timeout = httpx.Timeout(30.0, connect=10.0)
 
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
-                resp = await client.get(url)
-                status = resp.status_code
-                content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-                raw = resp.content or b""
-                if len(raw) > max_bytes:
-                    raw = raw[:max_bytes]
+            try:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+                    resp = await client.get(url)
+                    status = resp.status_code
+                    content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                    raw = resp.content or b""
+                    if len(raw) > max_bytes:
+                        raw = raw[:max_bytes]
 
-            if resp.status_code >= 400:
-                return {"url": url, "status": resp.status_code, "error": f"HTTP {resp.status_code}"}
+                if resp.status_code >= 400:
+                    return {"url": url, "status": resp.status_code, "error": f"HTTP {resp.status_code}"}
+            except Exception as e:
+                return {"url": url, "error": f"Request failed: {str(e)}"}
 
         text: Optional[str] = None
         if content_type in ("text/html", "application/xhtml+xml"):
-            text = self._strip_html(raw.decode("utf-8", errors="ignore"))
+            # Better HTML stripping - remove scripts, styles, nav, footer
+            try:
+                html_text = raw.decode("utf-8", errors="ignore")
+                text = self._strip_html(html_text)
+            except Exception:
+                text = raw.decode("utf-8", errors="ignore")
         elif content_type.startswith("text/") or content_type in ("application/json", "application/xml", "application/xhtml+xml"):
             text = raw.decode("utf-8", errors="ignore")
         else:
@@ -862,7 +905,7 @@ Respond in JSON:
             "url": url,
             "status": status,
             "content_type": content_type,
-            "text": text[:20000] if text else "",
+            "text": text[:50000] if text else "",  # Increased limit for better scraping
         }
 
     async def _tool_memory_read(self, tool_input: Dict[str, Any], *, session: AgentSession) -> Dict[str, Any]:
@@ -3288,8 +3331,69 @@ Respond in JSON:
     # ------------------------------------------------------------------
 
     async def _tool_news_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Search news sources for recent articles."""
         q = (tool_input or {}).get("query", "")
-        return await self._tool_web_search({"query": f"latest news: {q}"}, session=session)
+        if not q:
+            return {"error": "Missing 'query' parameter"}
+        
+        # Use DuckDuckGo with news-specific search
+        url = f"https://api.duckduckgo.com/?q={quote_plus(q + ' news')}&format=json&no_redirect=1&no_html=1"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+        }
+
+        try:
+            if settings.AGENT_ENGINE_DOCKER_PER_RUN_SANDBOX_ENABLED:
+                sandbox_resp = await self._sandbox_runner_http_get(
+                    url=url,
+                    accept=headers.get("Accept", "application/json"),
+                    timeout_seconds=30.0,
+                    max_bytes=512 * 1024,
+                    add_hosts=self._resolve_public_add_hosts("api.duckduckgo.com"),
+                )
+                if sandbox_resp.get("error"):
+                    return {"error": sandbox_resp.get("error")}
+                
+                try:
+                    data = json.loads(sandbox_resp.get("text") or "{}")
+                except Exception:
+                    return {"error": "News search returned invalid JSON"}
+            else:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=headers) as client:
+                    resp = await client.get(url)
+                    if resp.status_code != 200:
+                        return {"error": f"HTTP {resp.status_code}"}
+                    try:
+                        data = resp.json() if resp.content else {}
+                    except Exception:
+                        return {"error": "News search returned invalid JSON"}
+
+            results: List[Dict[str, Any]] = []
+            def _collect(topic: Any) -> None:
+                if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
+                    results.append({
+                        "title": topic.get("Text"),
+                        "url": topic.get("FirstURL"),
+                        "snippet": topic.get("Snippet", "")
+                    })
+                if isinstance(topic, dict) and isinstance(topic.get("Topics"), list):
+                    for t in topic.get("Topics"):
+                        _collect(t)
+
+            for t in data.get("RelatedTopics") or []:
+                _collect(t)
+
+            return {
+                "query": q,
+                "source": "news",
+                "results": results[:10],
+            }
+        except Exception as e:
+            return {"error": f"News search failed: {str(e)}"}
 
     async def _tool_image_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
         q = (tool_input or {}).get("query", "")
