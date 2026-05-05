@@ -3522,17 +3522,58 @@ Respond in JSON:
         }
 
     async def _tool_weather(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Get current weather for a location."""
         loc = (tool_input or {}).get("location") or (tool_input or {}).get("query", "")
-        return await self._tool_web_search({"query": f"current weather in {loc}"}, session=session)
+        if not loc:
+            return {"error": "Missing 'location' or 'query' parameter"}
+        
+        results = await self._tool_web_search({"query": f"current weather in {loc}"}, session=session)
+        if results.get("error"):
+            return {"error": f"Weather search failed: {results.get('error')}"}
+        
+        return {
+            "location": loc,
+            "source": "weather",
+            "results": results.get("results", [])[:5]
+        }
 
     async def _tool_stock_crypto(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Get current price for stock or cryptocurrency."""
         sym = (tool_input or {}).get("symbol") or (tool_input or {}).get("query", "")
-        return await self._tool_web_search({"query": f"current price of {sym} stock crypto"}, session=session)
+        if not sym:
+            return {"error": "Missing 'symbol' or 'query' parameter"}
+        
+        results = await self._tool_web_search({"query": f"current price of {sym} stock crypto"}, session=session)
+        if results.get("error"):
+            return {"error": f"Stock/crypto search failed: {results.get('error')}"}
+        
+        return {
+            "symbol": sym,
+            "source": "stock_crypto",
+            "results": results.get("results", [])[:5]
+        }
 
     async def _tool_places_search(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
+        """Search for places near a location."""
         q = (tool_input or {}).get("query", "")
         loc = (tool_input or {}).get("location", "")
-        return await self._tool_web_search({"query": f"places: {q} near {loc}"}, session=session)
+        if not q:
+            return {"error": "Missing 'query' parameter"}
+        
+        search_query = f"places: {q}"
+        if loc:
+            search_query += f" near {loc}"
+        
+        results = await self._tool_web_search({"query": search_query}, session=session)
+        if results.get("error"):
+            return {"error": f"Places search failed: {results.get('error')}"}
+        
+        return {
+            "query": q,
+            "location": loc,
+            "source": "places",
+            "results": results.get("results", [])[:10]
+        }
 
     # ------------------------------------------------------------------
     # Rabbit community tools — proxy to rabbit service via platform_api
