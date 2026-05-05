@@ -3488,10 +3488,10 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
         try:
             await asyncio.wait_for(
                 _run_agent_session_background_inner(session_id=str(session_uuid), agent_id=str(agent_uuid)),
-                timeout=300,  # 5 minute max per session
+                timeout=900,  # 15 minute max per session (increased from 5 min for complex goals)
             )
         except asyncio.TimeoutError:
-            logger.error("Agent session %s timed out after 5 minutes", session_id)
+            logger.error("Agent session %s timed out after 15 minutes", session_id)
             try:
                 async with async_session() as db_session:
                     result = await db_session.execute(
@@ -3500,7 +3500,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
                     agent_session = result.scalar_one_or_none()
                     if agent_session and agent_session.status in ("initializing", "queued", "running"):
                         agent_session.status = "failed"
-                        agent_session.error_message = "Session timed out (5 minute limit)"
+                        agent_session.error_message = "Session timed out (15 minute limit)"
                         await db_session.commit()
             except Exception:
                 pass
