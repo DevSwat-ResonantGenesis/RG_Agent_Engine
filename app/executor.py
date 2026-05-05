@@ -962,8 +962,35 @@ Respond in JSON:
         return {"error": "Rabbit community services are currently disabled"}
 
     async def _tool_http_request(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Make an HTTP request — TODO: reimplement via unified tool registry."""
-        return {"error": "HTTP request tool not yet migrated to unified registry"}
+        """Make an HTTP request to internal platform APIs or external URLs.
+
+        For internal service calls, proxies via platform_api.
+        For external URLs, delegates to external_http_request with SSRF protection.
+        """
+        url = (tool_input or {}).get("url", "")
+        method = ((tool_input or {}).get("method") or "GET").upper()
+        body = (tool_input or {}).get("body")
+        headers = (tool_input or {}).get("headers") or {}
+
+        if not url:
+            return {"error": "Missing 'url' parameter"}
+
+        # If it looks like an internal service URL, proxy through platform_api
+        if any(svc in url for svc in ["localhost", "_service:", "127.0.0.1"]):
+            return await self._tool_platform_api({
+                "service": "gateway",
+                "endpoint": url,
+                "method": method,
+                "body": body,
+            }, session=session)
+
+        # Otherwise delegate to external_http_request (has SSRF protection)
+        return await self._tool_external_http_request({
+            "url": url,
+            "method": method,
+            "body": body,
+            "headers": headers,
+        }, session=session)
 
     # ================================================================
     # GMAIL + SLACK TOOLS (Phase 2.5, backed by shared/tools/)
