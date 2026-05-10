@@ -2956,11 +2956,17 @@ Respond in JSON:
             await db_session.commit()
 
             # Truncate large results before they go into history
-            # (fetch_url can return 20K+ chars of HTML, blowing up the prompt)
+            # Keep enough content for the agent to extract useful data (12K chars)
             result_for_history = result
             result_str = json.dumps(result, ensure_ascii=False)
-            if len(result_str) > 2000:
-                result_for_history = {"summary": result_str[:2000] + "...(truncated)"}
+            if len(result_str) > 12000:
+                # For fetch_url results, keep the text field but truncate it
+                if isinstance(result, dict) and "text" in result:
+                    truncated = dict(result)
+                    truncated["text"] = result["text"][:10000] + "\n...(content truncated for context window)"
+                    result_for_history = truncated
+                else:
+                    result_for_history = {"summary": result_str[:10000] + "...(truncated)"}
 
             return {
                 "action": action.get("action"),
@@ -3349,10 +3355,11 @@ Respond in JSON:
             if action == "tool_call" and tool:
                 tool_input = step.get("tool_input") or {}
                 result = step.get("result") or {}
-                # Truncate large results
+                # Allow more content for web tools so agent can actually use the data
+                max_result_len = 8000 if tool in ("fetch_url", "read_webpage", "scrape_page", "deep_research", "read_many_pages") else 1500
                 result_str = json.dumps(result, ensure_ascii=False)
-                if len(result_str) > 400:
-                    result_str = result_str[:400] + "...(truncated)"
+                if len(result_str) > max_result_len:
+                    result_str = result_str[:max_result_len] + "...(truncated)"
                 lines.append(f"Step {i+1}: Used {tool}({json.dumps(tool_input)})")
                 if error:
                     lines.append(f"  ERROR: {error}")

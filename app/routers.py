@@ -884,6 +884,190 @@ async def unpublish_from_marketplace(
     return {"agent_id": str(agent.id), "published_to_marketplace": False}
 
 
+# ============== Agent Avatar Endpoints ==============
+
+@router.post("/{agent_id}/avatar")
+async def upload_agent_avatar(
+    agent_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload or update an agent's custom avatar image (SVG, JPG, PNG)."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    from uuid import UUID
+    import base64
+    import os
+    from pathlib import Path
+
+    try:
+        agent_uuid = UUID(agent_id)
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    result = await session.execute(
+        select(AgentDefinition).where(AgentDefinition.id == agent_uuid)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.user_id and agent.user_id != user_uuid:
+        raise HTTPException(status_code=403, detail="Only owner can upload avatar")
+
+    # Parse multipart form data
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Validate file type
+    filename = file.filename
+    if not filename.lower().endswith(('.svg', '.jpg', '.jpeg', '.png')):
+        raise HTTPException(status_code=400, detail="Only SVG, JPG, JPEG, and PNG files are allowed")
+
+    # Read file content
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:  # 5MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+    # Create avatars directory if it doesn't exist
+    avatars_dir = Path("/app/avatars")
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename
+    file_ext = Path(filename).suffix
+    avatar_filename = f"{agent_id}{file_ext}"
+    avatar_path = avatars_dir / avatar_filename
+
+    # Save file
+    with open(avatar_path, "wb") as f:
+        f.write(content)
+
+    # Update agent with avatar URL
+    avatar_url = f"/avatars/{avatar_filename}"
+    agent.avatar_url = avatar_url
+    await session.commit()
+
+    return {"avatar_url": avatar_url, "agent_id": str(agent.id)}
+
+
+@router.delete("/{agent_id}/avatar")
+async def delete_agent_avatar(
+    agent_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete an agent's custom avatar and revert to default icon."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    from uuid import UUID
+    from pathlib import Path
+
+    try:
+        agent_uuid = UUID(agent_id)
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    result = await session.execute(
+        select(AgentDefinition).where(AgentDefinition.id == agent_uuid)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.user_id and agent.user_id != user_uuid:
+        raise HTTPException(status_code=403, detail="Only owner can delete avatar")
+
+    # Delete file if exists
+    if agent.avatar_url:
+        avatar_path = Path(f"/app{agent.avatar_url}")
+        if avatar_path.exists():
+            avatar_path.unlink()
+
+    # Clear avatar URL from database
+    agent.avatar_url = None
+    await session.commit()
+
+    return {"avatar_url": None, "agent_id": str(agent.id)}
+
+
+@router.put("/{agent_id}/avatar")
+async def change_agent_avatar(
+    agent_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Change an agent's avatar by uploading a new image (replaces existing)."""
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+
+    from uuid import UUID
+    from pathlib import Path
+
+    try:
+        agent_uuid = UUID(agent_id)
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    result = await session.execute(
+        select(AgentDefinition).where(AgentDefinition.id == agent_uuid)
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.user_id and agent.user_id != user_uuid:
+        raise HTTPException(status_code=403, detail="Only owner can change avatar")
+
+    # Delete old avatar file if exists
+    if agent.avatar_url:
+        old_avatar_path = Path(f"/app{agent.avatar_url}")
+        if old_avatar_path.exists():
+            old_avatar_path.unlink()
+
+    # Upload new avatar (reuse upload logic)
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Validate file type
+    filename = file.filename
+    if not filename.lower().endswith(('.svg', '.jpg', '.jpeg', '.png')):
+        raise HTTPException(status_code=400, detail="Only SVG, JPG, JPEG, and PNG files are allowed")
+
+    # Read file content
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:  # 5MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+    # Create avatars directory if it doesn't exist
+    avatars_dir = Path("/app/avatars")
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename
+    file_ext = Path(filename).suffix
+    avatar_filename = f"{agent_id}{file_ext}"
+    avatar_path = avatars_dir / avatar_filename
+
+    # Save file
+    with open(avatar_path, "wb") as f:
+        f.write(content)
+
+    # Update agent with new avatar URL
+    avatar_url = f"/avatars/{avatar_filename}"
+    agent.avatar_url = avatar_url
+    await session.commit()
+
+    return {"avatar_url": avatar_url, "agent_id": str(agent.id)}
+
+
 # ============== Agent Teams Endpoints (must be before /{agent_id} route) ==============
 
 @router.get("/teams")
