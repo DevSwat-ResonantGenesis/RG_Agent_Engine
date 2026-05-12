@@ -3556,13 +3556,18 @@ async def patch_agent(
         "id": str(agent.id),
         "name": agent.name,
         "description": agent.description,
+        "system_prompt": agent.system_prompt,
         "provider": agent.provider,
         "model": agent.model,
+        "temperature": agent.temperature,
+        "max_tokens": agent.max_tokens,
+        "tools": agent.tools,
         "mode": agent.mode,
         "is_active": agent.is_active,
         "version": agent.version,
         "updated_fields": updated,
         "agent_public_hash": agent.agent_public_hash,
+        "dsid": (agent.safety_config or {}).get("dsid"),
     }
 
 
