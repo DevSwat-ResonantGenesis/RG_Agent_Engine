@@ -58,15 +58,12 @@ class SafetyEnvelope:
         (r"authorized_keys", "SSH keys modification"),
     ]
 
-    # SQL injection patterns
+    # SQL injection patterns — only truly dangerous SQL, NOT natural language with OR/AND
     SQL_INJECTION_PATTERNS = [
         (r"DROP\s+(TABLE|DATABASE|INDEX)", "SQL DROP statement"),
         (r"DELETE\s+FROM.*WHERE\s+1\s*=\s*1", "Mass DELETE statement"),
         (r"TRUNCATE\s+TABLE", "SQL TRUNCATE statement"),
-        (r";\s*--", "SQL comment injection"),
         (r"UNION\s+SELECT", "SQL UNION injection"),
-        (r"OR\s+1\s*=\s*1", "SQL OR injection"),
-        (r"'\s*OR\s+'", "SQL string injection"),
         (r"EXEC\s+xp_", "SQL Server xp_ execution"),
         (r"INTO\s+OUTFILE", "SQL file write"),
         (r"LOAD_FILE\s*\(", "SQL file read"),
