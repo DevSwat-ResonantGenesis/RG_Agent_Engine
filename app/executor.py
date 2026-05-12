@@ -3175,6 +3175,19 @@ Respond in JSON:
                 "goal_achieved": False,
             }
 
+        # Safety: if LLM returned a JSON list instead of an object, unwrap first element or wrap
+        if isinstance(parsed, list):
+            logger.warning(f"[LLM] Got JSON list instead of object ({len(parsed)} items), unwrapping")
+            if parsed and isinstance(parsed[0], dict):
+                parsed = parsed[0]
+            else:
+                parsed = {
+                    "reasoning": "LLM returned a JSON array; treating as direct response.",
+                    "action": "respond",
+                    "response": content[:4000],
+                    "goal_achieved": False,
+                }
+
         parsed["_tokens_used"] = tokens_used
         logger.info(f"[LLM] Success via {response.provider}/{response.model} ({tokens_used} tokens, fallback={response.was_fallback})")
         return parsed

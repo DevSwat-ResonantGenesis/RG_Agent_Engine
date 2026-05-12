@@ -4346,7 +4346,7 @@ async def approve_step(
     session_id: str,
     step_id: str,
     approved: bool = True,
-    background_tasks: BackgroundTasks = None,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     session: AsyncSession = Depends(get_session),
 ):
     """Approve or reject a step requiring approval."""
@@ -4363,8 +4363,7 @@ async def approve_step(
             await session.commit()
 
             # Re-enter execution loop in background so the session actually resumes
-            if background_tasks:
-                background_tasks.add_task(_resume_session_after_approval, str(session_id))
+            background_tasks.add_task(_resume_session_after_approval, str(session_id))
     elif not approved:
         # Rejected — mark session as failed
         result = await session.execute(
