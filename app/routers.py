@@ -246,6 +246,12 @@ async def best_effort_issue_dsid_and_register(*, agent: "AgentDefinition", user_
     except Exception:
         dsid_value = None
 
+    # Fallback: generate deterministic DSID locally if blockchain unavailable
+    if not dsid_value:
+        agent_content = f"{agent.id}:{agent.name}:{agent.model}:{','.join(agent.tools or [])}"
+        dsid_value = f"dsid:{hashlib.sha256(agent_content.encode()).hexdigest()[:40]}"
+        dsid_content_hash = hashlib.sha256(agent_content.encode()).hexdigest()
+
     if dsid_value:
         safety_config["dsid"] = dsid_value
         if dsid_content_hash:
@@ -393,8 +399,11 @@ class AgentResponse(BaseModel):
     id: str
     name: str
     description: Optional[str]
+    system_prompt: Optional[str] = None
     provider: Optional[str] = None
     model: str
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
     tool_mode: Optional[str] = "smart"
     tools: Optional[List[str]]
     mode: Optional[str] = None
@@ -1773,8 +1782,11 @@ async def create_agent(
             id=str(agent.id),
             name=agent.name,
             description=agent.description,
+            system_prompt=agent.system_prompt,
             provider=agent.provider,
             model=agent.model,
+            temperature=agent.temperature,
+            max_tokens=agent.max_tokens,
             tool_mode=getattr(agent, 'tool_mode', None) or 'smart',
             tools=agent.tools,
             mode=agent.mode,
@@ -1897,8 +1909,11 @@ async def list_agents(
                     id=str(a.id),
                     name=a.name,
                     description=a.description,
+                    system_prompt=a.system_prompt,
                     provider=a.provider,
                     model=a.model,
+                    temperature=a.temperature,
+                    max_tokens=a.max_tokens,
                     tool_mode=getattr(a, 'tool_mode', None) or 'smart',
                     tools=a.tools,
                     mode=getattr(a, 'mode', None) or 'governed',
@@ -2098,7 +2113,11 @@ async def instantiate_agent_template(
         id=str(agent.id),
         name=agent.name,
         description=agent.description,
+        system_prompt=agent.system_prompt,
+        provider=agent.provider,
         model=agent.model,
+        temperature=agent.temperature,
+        max_tokens=agent.max_tokens,
         tools=agent.tools,
         is_active=agent.is_active,
         version=agent.version,
@@ -3448,8 +3467,11 @@ async def get_agent(
         id=str(agent.id),
         name=agent.name,
         description=agent.description,
+        system_prompt=agent.system_prompt,
         provider=agent.provider,
         model=agent.model,
+        temperature=agent.temperature,
+        max_tokens=agent.max_tokens,
         tool_mode=getattr(agent, 'tool_mode', None) or 'smart',
         tools=agent.tools,
         mode=agent.mode,
