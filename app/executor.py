@@ -1942,77 +1942,121 @@ Respond in JSON:
         return token, None
 
     async def _tool_generate_image(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Generate an image using OpenAI DALL-E 3 with the user's API key."""
+        """Generate an image using TokenRouter image models (GPT-5-image, Gemini Flash Image)."""
         prompt = (tool_input or {}).get("prompt", "").strip()
         if not prompt:
             return {"error": "Missing 'prompt' — describe the image you want to generate."}
 
-        # Get user's OpenAI API key
-        openai_key = await self._get_user_api_key(session, "openai")
-        if not openai_key:
-            return {
-                "error": "No OpenAI API key found. To generate images, add your OpenAI API key in Settings > API Keys.",
-                "help": "Go to Settings > API Keys and add your OpenAI key to enable DALL-E 3 image generation.",
-            }
-
         size = (tool_input or {}).get("size", "1024x1024")
         if size not in ("1024x1024", "1792x1024", "1024x1792"):
             size = "1024x1024"
-        quality = (tool_input or {}).get("quality", "standard")
-        if quality not in ("standard", "hd"):
-            quality = "standard"
-        style = (tool_input or {}).get("style", "vivid")
-        if style not in ("vivid", "natural"):
-            style = "vivid"
 
-        print(f"[GENERATE_IMAGE] Calling DALL-E 3: prompt={prompt[:80]!r} size={size}", flush=True)
+        # Use TokenRouter image models via chat completions API
+        tokenrouter_key = os.getenv("TOKENROUTER_API_KEY", "")
+        if not tokenrouter_key:
+            # Fallback: try user's OpenAI key with DALL-E
+            openai_key = await self._get_user_api_key(session, "openai")
+            if not openai_key or "placeholder" in openai_key.lower():
+                return {"error": "No image generation API key available. TOKENROUTER_API_KEY is not set."}
+            return await self._tool_generate_image_dalle(prompt, size, openai_key)
 
+        # Try TokenRouter image models in order of preference
+        image_models = ["openai/gpt-5-image", "openai/gpt-5-image-mini", "google/gemini-3.1-flash-image-preview"]
+        base_url = "https://api.tokenrouter.com/v1"
+
+        for model in image_models:
+            print(f"[GENERATE_IMAGE] Trying {model}: prompt={prompt[:80]!r}", flush=True)
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {tokenrouter_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": "You are an image generation assistant. Generate the requested image. Respond ONLY with the image."},
+                                {"role": "user", "content": f"Generate an image: {prompt}"},
+                            ],
+                            "max_tokens": 4096,
+                        },
+                    )
+                    if resp.status_code != 200:
+                        print(f"[GENERATE_IMAGE] {model} HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+                        continue
+
+                    data = resp.json()
+                    choice = data.get("choices", [{}])[0]
+                    msg = choice.get("message", {})
+
+                    # Extract images from dedicated images field (GPT-5-image format)
+                    raw_images = msg.get("images") or []
+                    for img in raw_images:
+                        if isinstance(img, dict):
+                            img_url = ""
+                            if img.get("type") == "image_url":
+                                img_url = (img.get("image_url") or {}).get("url", "")
+                            elif img.get("url"):
+                                img_url = img["url"]
+                            if img_url:
+                                print(f"[GENERATE_IMAGE] SUCCESS via {model}: url_len={len(img_url)}", flush=True)
+                                return {
+                                    "success": True,
+                                    "image_url": img_url,
+                                    "revised_prompt": prompt,
+                                    "model": model,
+                                    "size": size,
+                                }
+
+                    # Check content for image URLs/base64
+                    content = msg.get("content") or ""
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "image_url":
+                                url = (block.get("image_url") or {}).get("url", "")
+                                if url:
+                                    print(f"[GENERATE_IMAGE] SUCCESS via {model} (content block)", flush=True)
+                                    return {"success": True, "image_url": url, "revised_prompt": prompt, "model": model, "size": size}
+                    elif isinstance(content, str) and content:
+                        # Check for markdown images or data URIs
+                        import re as _re
+                        md_match = _re.search(r'!\[[^\]]*\]\(([^)]+)\)', content)
+                        if md_match:
+                            print(f"[GENERATE_IMAGE] SUCCESS via {model} (markdown)", flush=True)
+                            return {"success": True, "image_url": md_match.group(1), "revised_prompt": prompt, "model": model, "size": size}
+                        b64_match = _re.search(r'(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)', content)
+                        if b64_match:
+                            print(f"[GENERATE_IMAGE] SUCCESS via {model} (base64)", flush=True)
+                            return {"success": True, "image_url": b64_match.group(1), "revised_prompt": prompt, "model": model, "size": size}
+
+                    print(f"[GENERATE_IMAGE] {model} returned no image in response", flush=True)
+            except Exception as e:
+                print(f"[GENERATE_IMAGE] {model} failed: {e}", flush=True)
+                continue
+
+        return {"error": "All image generation models failed. Please try again."}
+
+    async def _tool_generate_image_dalle(self, prompt: str, size: str, openai_key: str) -> Dict[str, Any]:
+        """Fallback: generate image via direct DALL-E API."""
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     "https://api.openai.com/v1/images/generations",
-                    headers={
-                        "Authorization": f"Bearer {openai_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "dall-e-3",
-                        "prompt": prompt,
-                        "n": 1,
-                        "size": size,
-                        "quality": quality,
-                        "style": style,
-                        "response_format": "url",
-                    },
+                    headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                    json={"model": "dall-e-3", "prompt": prompt, "n": 1, "size": size, "response_format": "url"},
                 )
                 if resp.status_code != 200:
-                    error_detail = ""
-                    try:
-                        error_detail = resp.json().get("error", {}).get("message", resp.text[:200])
-                    except Exception:
-                        error_detail = resp.text[:200]
-                    print(f"[GENERATE_IMAGE] DALL-E error {resp.status_code}: {error_detail}", flush=True)
+                    error_detail = resp.json().get("error", {}).get("message", resp.text[:200])
                     return {"error": f"DALL-E API error: {error_detail}"}
-
                 data = resp.json()
                 images = data.get("data", [])
                 if not images:
                     return {"error": "DALL-E returned no images"}
-
-                image_url = images[0].get("url", "")
-                revised_prompt = images[0].get("revised_prompt", prompt)
-                print(f"[GENERATE_IMAGE] SUCCESS: url={image_url[:80]}", flush=True)
-
-                return {
-                    "success": True,
-                    "image_url": image_url,
-                    "revised_prompt": revised_prompt,
-                    "model": "dall-e-3",
-                    "size": size,
-                }
+                return {"success": True, "image_url": images[0].get("url", ""), "revised_prompt": images[0].get("revised_prompt", prompt), "model": "dall-e-3", "size": size}
         except Exception as e:
-            print(f"[GENERATE_IMAGE] Exception: {e}", flush=True)
-            return {"error": f"Image generation failed: {str(e)}"}
+            return {"error": f"DALL-E generation failed: {str(e)}"}
 
     async def _tool_generate_audio(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Generate speech audio using OpenAI TTS with the user's API key (BYOK)."""
