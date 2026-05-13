@@ -286,6 +286,9 @@ Respond in JSON:
             "send_email": self._tool_send_email,
             # Media
             "generate_image": self._tool_generate_image,
+            "image_gen.imagegen": self._tool_generate_image,
+            "image_gen.generate": self._tool_generate_image,
+            "image_generation": self._tool_generate_image,
             "generate_audio": self._tool_generate_audio,
             "generate_music": self._tool_generate_music,
             "generate_video": self._tool_generate_video,
