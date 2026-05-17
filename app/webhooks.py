@@ -504,7 +504,7 @@ async def github_webhook(
 
 
 # ============================================
-# Auto-create helper (called from skill_executor)
+# Auto-create helper (called from tool_executor)
 # ============================================
 
 async def auto_create_webhook_trigger(
