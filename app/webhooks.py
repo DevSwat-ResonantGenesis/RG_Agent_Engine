@@ -288,7 +288,7 @@ def interpolate_goal(template: str, event: Dict[str, Any]) -> str:
 
 def _build_public_url(webhook_path: str) -> str:
     """Build the full public webhook URL."""
-    return f"https://{PLATFORM_DOMAIN}/api/agents{webhook_path}"
+    return f"https://{PLATFORM_DOMAIN}/api/v1{webhook_path}"
 
 
 def _try_queue_execution(agent_id: str, goal: str, context: dict, user_id: str) -> Optional[str]:
