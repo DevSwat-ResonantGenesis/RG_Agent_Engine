@@ -371,21 +371,6 @@ async def maybe_start_scheduler():
         logger.error(f"Failed to start scheduler daemon: {e}")
 
 
-@app.on_event("startup")
-async def maybe_start_task_queue():
-    print(f"[STARTUP] Task queue daemon check: AGENT_ENGINE_ENABLE_TASK_QUEUE={os.getenv('AGENT_ENGINE_ENABLE_TASK_QUEUE', 'true')}")
-    logger.info(f"[STARTUP] Task queue daemon check: AGENT_ENGINE_ENABLE_TASK_QUEUE={os.getenv('AGENT_ENGINE_ENABLE_TASK_QUEUE', 'true')}")
-    if os.getenv("AGENT_ENGINE_ENABLE_TASK_QUEUE", "true").lower() != "true":
-        logger.info("[STARTUP] Task queue daemon disabled by env var")
-        return
-    try:
-        from .task_queue_daemon import start_task_queue
-        asyncio.create_task(start_task_queue())
-        logger.info("Task queue daemon enabled: PostgreSQL-backed task execution")
-    except Exception as e:
-        logger.error(f"Failed to start task queue daemon: {e}")
-
-
 @app.on_event("shutdown")
 async def maybe_stop_scheduler():
     if os.getenv("AGENT_ENGINE_ENABLE_SCHEDULER", "true").lower() != "true":

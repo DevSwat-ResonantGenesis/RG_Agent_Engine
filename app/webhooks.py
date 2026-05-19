@@ -291,22 +291,31 @@ def _build_public_url(webhook_path: str) -> str:
     return f"https://{PLATFORM_DOMAIN}/api/v1{webhook_path}"
 
 
-async def _try_queue_execution(agent_id: str, goal: str, context: dict, user_id: str, source_id: str) -> Optional[str]:
-    """Queue agent execution via PostgreSQL task queue. Returns task_id or None."""
+def _try_queue_execution(agent_id: str, goal: str, context: dict, user_id: str, source_id: str) -> Optional[str]:
+    """Queue agent execution. Uses asyncio background task (no Celery needed).
+    Returns session_id or None."""
+    import asyncio
+    session_id = str(uuid4())
+
+    async def _run():
+        try:
+            from .scheduler_daemon import _fire_session
+            await _fire_session(
+                agent_id=agent_id,
+                goal=goal,
+                context=context,
+                user_id=user_id,
+                source=f"webhook:{source_id}",
+            )
+        except Exception as e:
+            logger.error(f"Webhook agent execution failed for {agent_id}: {e}")
+
     try:
-        from .task_queue_daemon import enqueue_task
-        task_id = await enqueue_task(
-            agent_id=agent_id,
-            goal=goal,
-            context=context,
-            user_id=user_id,
-            source="webhook",
-            source_id=source_id,
-            priority=10,  # Webhooks get higher priority than scheduled tasks
-        )
-        return task_id
-    except Exception as e:
-        logger.error(f"Webhook task enqueue failed for {agent_id}: {e}")
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run())
+        return session_id
+    except RuntimeError:
+        logger.warning("No running event loop for webhook execution")
         return None
 
 
@@ -803,7 +812,7 @@ async def trigger_agent_webhook(
     }
 
     # Queue agent execution
-    session_id = await _try_queue_execution(
+    session_id = _try_queue_execution(
         agent_id=str(trigger["agent_id"]),
         goal=goal,
         context=context,
