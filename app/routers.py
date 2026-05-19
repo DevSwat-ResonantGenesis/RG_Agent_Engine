@@ -22,10 +22,10 @@ from .websocket_streaming import get_connection_manager, get_execution_streamer
 from .db import get_session, async_session
 from .models import (
     AgentDefinition, AgentSession, AgentStep, AgentPlan, AgentVersion,
-    ToolDefinition, SafetyRule, WorkflowTrigger,
+    ToolDefinition, SafetyRule,
     AgentTeam, AgentTeamMember, AgentTeamWorkflow, AgentTeamRental
 )
-from .executor import agent_executor, trigger_manager
+from .executor import agent_executor
 from .safety import approval_manager
 from .publish_agent import publish_agent_to_blockchain
 
@@ -501,18 +501,6 @@ class SafetyRuleCreate(BaseModel):
     parameters: Optional[Dict[str, Any]] = None
     priority: int = 0
 
-
-class TriggerCreate(BaseModel):
-    name: str
-    trigger_type: str  # schedule, webhook, event, condition
-    config: Dict[str, Any]
-    cron_expression: Optional[str] = None
-    event_type: Optional[str] = None
-    event_filter: Optional[Dict[str, Any]] = None
-    input_template: Optional[Dict[str, Any]] = None
-
-
-# ============== Agent Teams Request/Response Models ==============
 
 class TeamCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -4901,115 +4889,6 @@ async def list_safety_rules(
     ]
 
 
-# ============== Trigger Endpoints ==============
-
-@router.post("/{agent_id}/triggers", status_code=status.HTTP_201_CREATED)
-async def create_trigger(
-    agent_id: str,
-    payload: TriggerCreate,
-    session: AsyncSession = Depends(get_session),
-):
-    """Create a workflow trigger for an agent."""
-    trigger = WorkflowTrigger(
-        agent_id=agent_id,
-        name=payload.name,
-        trigger_type=payload.trigger_type,
-        config=payload.config,
-        cron_expression=payload.cron_expression,
-        event_type=payload.event_type,
-        event_filter=payload.event_filter,
-        input_template=payload.input_template,
-    )
-    session.add(trigger)
-    await session.commit()
-    await session.refresh(trigger)
-
-    return {
-        "id": str(trigger.id),
-        "name": trigger.name,
-        "trigger_type": trigger.trigger_type,
-        "is_active": trigger.is_active,
-    }
-
-
-@router.get("/{agent_id}/triggers")
-async def list_triggers(
-    agent_id: str,
-    session: AsyncSession = Depends(get_session),
-):
-    """List triggers for an agent."""
-    result = await session.execute(
-        select(WorkflowTrigger).where(WorkflowTrigger.agent_id == agent_id)
-    )
-    triggers = result.scalars().all()
-
-    return [
-        {
-            "id": str(t.id),
-            "name": t.name,
-            "trigger_type": t.trigger_type,
-            "is_active": t.is_active,
-            "last_triggered_at": t.last_triggered_at.isoformat() if t.last_triggered_at else None,
-            "trigger_count": t.trigger_count,
-        }
-        for t in triggers
-    ]
-
-
-@router.post("/triggers/webhook/{trigger_id}")
-async def webhook_trigger(
-    trigger_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    session: AsyncSession = Depends(get_session),
-):
-    """Handle webhook trigger."""
-    secret = request.headers.get("x-webhook-secret", "")
-    payload = await request.json()
-
-    trigger = await trigger_manager.process_webhook(
-        trigger_id=trigger_id,
-        payload=payload,
-        secret=secret,
-        db_session=session,
-    )
-
-    if not trigger:
-        raise HTTPException(status_code=404, detail="Trigger not found or invalid secret")
-
-    # Get agent and start session
-    result = await session.execute(
-        select(AgentDefinition).where(AgentDefinition.id == trigger.agent_id)
-    )
-    agent = result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    # Build input from template
-    input_data = trigger.input_template or {}
-    input_data["webhook_payload"] = payload
-
-    agent_session = await agent_executor.start_session(
-        agent=agent,
-        goal=input_data.get("goal", "Process webhook"),
-        initial_context=input_data,
-        user_id=None,
-        db_session=session,
-    )
-
-    # Update trigger stats
-    trigger.last_triggered_at = datetime.utcnow()
-    trigger.trigger_count += 1
-    await session.commit()
-
-    # Run in background
-    background_tasks.add_task(
-        _run_agent_session_background,
-        session_id=str(agent_session.id),
-        agent_id=str(agent.id),
-    )
-
-    return {"status": "triggered", "session_id": str(agent_session.id)}
 
 
 # ============== Schedule CRUD (Phase 1.1) ==============

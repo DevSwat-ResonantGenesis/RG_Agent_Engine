@@ -291,31 +291,22 @@ def _build_public_url(webhook_path: str) -> str:
     return f"https://{PLATFORM_DOMAIN}/api/v1{webhook_path}"
 
 
-def _try_queue_execution(agent_id: str, goal: str, context: dict, user_id: str) -> Optional[str]:
-    """Queue agent execution. Uses asyncio background task (no Celery needed).
-    Returns session_id or None."""
-    import asyncio
-    session_id = str(uuid4())
-
-    async def _run():
-        try:
-            from .scheduler_daemon import _fire_session
-            await _fire_session(
-                agent_id=agent_id,
-                goal=goal,
-                context=context,
-                user_id=user_id,
-                source=f"webhook:{agent_id}",
-            )
-        except Exception as e:
-            logger.error(f"Webhook agent execution failed for {agent_id}: {e}")
-
+async def _try_queue_execution(agent_id: str, goal: str, context: dict, user_id: str, source_id: str) -> Optional[str]:
+    """Queue agent execution via PostgreSQL task queue. Returns task_id or None."""
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_run())
-        return session_id
-    except RuntimeError:
-        logger.warning("No running event loop for webhook execution")
+        from .task_queue_daemon import enqueue_task
+        task_id = await enqueue_task(
+            agent_id=agent_id,
+            goal=goal,
+            context=context,
+            user_id=user_id,
+            source="webhook",
+            source_id=source_id,
+            priority=10,  # Webhooks get higher priority than scheduled tasks
+        )
+        return task_id
+    except Exception as e:
+        logger.error(f"Webhook task enqueue failed for {agent_id}: {e}")
         return None
 
 
@@ -411,14 +402,14 @@ async def create_webhook_trigger(
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing x-user-id header")
 
-    # Verify agent exists and belongs to user
+    # Verify agent exists AND belongs to this user
     agent_row = await db.execute(
-        text("SELECT id, name, user_id FROM agent_definitions WHERE id = :aid"),
-        {"aid": agent_id},
+        text("SELECT id, name, user_id FROM agent_definitions WHERE id = :aid AND user_id = :uid"),
+        {"aid": agent_id, "uid": user_id},
     )
     agent = agent_row.mappings().first()
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail="Agent not found or not owned by you")
 
     # Check if trigger already exists
     existing = await db.execute(
@@ -488,6 +479,7 @@ async def list_agent_webhooks(
     db: AsyncSession = Depends(get_session),
 ):
     """List all webhook triggers for an agent."""
+    user_id = request.headers.get("x-user-id", "")
     result = await db.execute(
         text("""
             SELECT t.id, t.agent_id, t.name, t.enabled, t.webhook_path,
@@ -496,9 +488,10 @@ async def list_agent_webhooks(
             FROM agent_triggers t
             LEFT JOIN agent_definitions a ON a.id = t.agent_id
             WHERE t.agent_id = :aid AND t.trigger_type = 'webhook'
+              AND (t.user_id = :uid OR :uid = '')
             ORDER BY t.created_at DESC
         """),
-        {"aid": agent_id},
+        {"aid": agent_id, "uid": user_id},
     )
     rows = result.mappings().all()
 
@@ -633,8 +626,10 @@ async def delete_webhook_trigger(
 ):
     """Delete a webhook trigger."""
     user_id = request.headers.get("x-user-id", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing x-user-id header")
     result = await db.execute(
-        text("DELETE FROM agent_triggers WHERE id = :tid AND (user_id = :uid OR :uid = '') RETURNING id"),
+        text("DELETE FROM agent_triggers WHERE id = :tid AND user_id = :uid RETURNING id"),
         {"tid": trigger_id, "uid": user_id},
     )
     deleted = result.first()
@@ -651,9 +646,12 @@ async def toggle_webhook_trigger(
     db: AsyncSession = Depends(get_session),
 ):
     """Enable or disable a webhook trigger."""
+    user_id = request.headers.get("x-user-id", "")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing x-user-id header")
     result = await db.execute(
-        text("UPDATE agent_triggers SET enabled = NOT enabled WHERE id = :tid RETURNING id, enabled"),
-        {"tid": trigger_id},
+        text("UPDATE agent_triggers SET enabled = NOT enabled WHERE id = :tid AND user_id = :uid RETURNING id, enabled"),
+        {"tid": trigger_id, "uid": user_id},
     )
     row = result.first()
     if not row:
@@ -805,11 +803,12 @@ async def trigger_agent_webhook(
     }
 
     # Queue agent execution
-    session_id = _try_queue_execution(
+    session_id = await _try_queue_execution(
         agent_id=str(trigger["agent_id"]),
         goal=goal,
         context=context,
         user_id=trigger.get("user_id", ""),
+        source_id=trigger_id,
     )
 
     # Update trigger stats
