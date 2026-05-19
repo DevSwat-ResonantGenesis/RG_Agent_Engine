@@ -51,7 +51,7 @@ async def enqueue_task(
         result = await db.execute(
             text("""
                 INSERT INTO agent_task_queue (agent_id, user_id, goal, context, source, source_id, priority, max_retries)
-                VALUES (:aid, :uid, :goal, :ctx::jsonb, :src, :sid, :prio, :max_retries)
+                VALUES (:aid, :uid, :goal, :ctx, :src, :sid, :prio, :max_retries)
                 RETURNING id
             """),
             {
