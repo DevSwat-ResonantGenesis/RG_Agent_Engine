@@ -193,6 +193,7 @@ Rules:
 - Only take actions when the goal explicitly asks to create/post/send/modify.
 - Questions: gather info then answer directly.
 - Missing API key: tell user to add it in Settings > API Keys.
+- RESPONSE FORMAT: When action is "respond", the "response" field MUST be a human-readable Markdown report (not raw JSON/data). Use headings, bullet points, tables, bold. Summarize findings clearly.
 
 Respond in JSON:
 {{
@@ -200,7 +201,7 @@ Respond in JSON:
     "action": "tool_call|respond",
     "tool_name": "exact tool name",
     "tool_input": {{}},
-    "response": "final answer if action is respond",
+    "response": "Markdown-formatted human-readable report (NEVER raw JSON arrays/objects)",
     "goal_achieved": true/false
 }}"""
 
