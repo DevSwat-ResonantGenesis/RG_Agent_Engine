@@ -2630,10 +2630,11 @@ Respond in JSON:
                 # Check if goal achieved
                 if step_result.get("goal_achieved"):
                     session.status = "completed"
-                    session.final_output = step_result.get("response")
+                    _raw_response = step_result.get("response") or ""
+                    session.final_output = self._format_final_output(_raw_response)
                     session.completed_at = datetime.utcnow()
                     await db_session.commit()
-                    result = {"status": "completed", "output": step_result.get("response")}
+                    result = {"status": "completed", "output": session.final_output}
                     self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
                     return result
 
@@ -3448,6 +3449,41 @@ Respond in JSON:
         except Exception as e:
             logger.warning(f"ed_service proxy error for '{tool_name}': {e}")
             return {"error": str(e)}
+
+    def _format_final_output(self, raw: str) -> str:
+        """Convert raw JSON responses to human-readable Markdown."""
+        if not raw or not raw.strip():
+            return raw
+        # Check if the response is a JSON array/object — format it
+        stripped = raw.strip()
+        if stripped.startswith("[") or stripped.startswith("{"):
+            try:
+                data = json.loads(stripped)
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    # Format list of items as Markdown table/list
+                    lines = []
+                    for i, item in enumerate(data, 1):
+                        title = item.get("title") or item.get("event_name") or item.get("name") or f"Item {i}"
+                        lines.append(f"### {i}. {title}")
+                        for k, v in item.items():
+                            if k in ("title", "event_name", "name"):
+                                continue
+                            label = k.replace("_", " ").title()
+                            if isinstance(v, str) and v.startswith("http"):
+                                lines.append(f"- **{label}**: [{v}]({v})")
+                            else:
+                                lines.append(f"- **{label}**: {v}")
+                        lines.append("")
+                    return "\n".join(lines)
+                elif isinstance(data, dict):
+                    lines = []
+                    for k, v in data.items():
+                        label = k.replace("_", " ").title()
+                        lines.append(f"- **{label}**: {v}")
+                    return "\n".join(lines)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return raw
 
     def _format_history(self, history: List[Dict[str, Any]]) -> str:
         """Format history in a structured way the LLM can learn from."""
