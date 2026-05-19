@@ -2315,7 +2315,6 @@ Respond in JSON:
         _step_history: list,
     ) -> Dict[str, Any]:
         """Inner run loop — separated to enable learning wrapper."""
-        print(f"[RUN-LOOP] _run_loop_inner started for session={session.id} goal={session.current_goal[:80]}", flush=True)
         # === EMPTY/MEANINGLESS GOAL INTERCEPTOR ===
         # Reject goals that are empty, placeholder, or system noise BEFORE wasting tokens.
         goal_raw = (session.current_goal or "").strip()
@@ -2387,9 +2386,7 @@ Respond in JSON:
 
         # Fetch user BYOK keys once at session start (cached for all steps)
         user_id = str(session.user_id) if session.user_id else ""
-        print(f"[RUN-LOOP] Fetching BYOK keys for user={user_id}", flush=True)
         _user_keys = await self._fetch_user_byok_keys(user_id)
-        print(f"[RUN-LOOP] BYOK keys fetched: {list(_user_keys.keys()) if _user_keys else 'none'}", flush=True)
 
         # Credit tracking for this session
         _ctx = session.context or {}
@@ -2403,10 +2400,8 @@ Respond in JSON:
         _BILLING_URL = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000")
         _CREDIT_COST_LLM = 20
 
-        print(f"[RUN-LOOP] Loading safety rules", flush=True)
         # Load safety rules
         await safety_envelope.load_rules(db_session, str(agent.id))
-        print(f"[RUN-LOOP] Safety rules loaded", flush=True)
 
         # ── INTELLIGENCE LAYER: Memory recall + learning injection ──
         # Load relevant memories and past learnings BEFORE planning so the
@@ -2437,7 +2432,6 @@ Respond in JSON:
         session.status = "running"
         await db_session.commit()
 
-        print(f"[RUN-LOOP] Creating plan", flush=True)
         # Create initial plan (tool names from unified registry)
         _tool_names = [t.name for t in self._registry.get_all()]
         plan_data = await tool_planner.create_plan(
@@ -2468,7 +2462,6 @@ Respond in JSON:
         )
         db_session.add(plan)
         await db_session.commit()
-        print(f"[RUN-LOOP] Plan created, entering main loop", flush=True)
 
         history = []
         
@@ -2513,6 +2506,8 @@ Respond in JSON:
                     "tool_name": step_result.get("tool_name"),
                     "goal_achieved": step_result.get("goal_achieved", False),
                     "error": step_result.get("error"),
+                    "result": step_result.get("result"),
+                    "response": step_result.get("response"),
                 })
                 session.loop_count += 1
                 session.last_activity_at = datetime.utcnow()
@@ -2676,12 +2671,27 @@ Respond in JSON:
                 # Delay between iterations to avoid Groq rate limits
                 await asyncio.sleep(1.5)
 
-            # Loop limit reached
+            # Loop limit reached — synthesize final output from tool results
+            _final_parts = []
+            for sh in _step_history:
+                if sh.get("action") == "tool_call" and sh.get("result"):
+                    _r = sh["result"]
+                    if isinstance(_r, dict):
+                        _r = json.dumps(_r, indent=2)[:500]
+                    elif isinstance(_r, str):
+                        _r = _r[:500]
+                    else:
+                        _r = str(_r)[:500]
+                    _final_parts.append(f"[{sh.get('tool_name','?')}]: {_r}")
+                elif sh.get("action") == "respond" and sh.get("response"):
+                    _final_parts.append(sh["response"])
+            _synthesized = "\n".join(_final_parts[-5:]) if _final_parts else "Agent reached loop limit without producing a final response."
             session.status = "completed"
+            session.final_output = _synthesized
             session.error_message = "Completed (loop limit reached)"
             session.completed_at = datetime.utcnow()
             await db_session.commit()
-            result = {"status": "failed", "error": "Maximum iterations reached"}
+            result = {"status": "completed", "output": _synthesized}
             self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
             return result
 

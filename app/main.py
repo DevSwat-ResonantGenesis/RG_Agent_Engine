@@ -341,13 +341,13 @@ async def ensure_schema():
         )""",
     ]
 
-    async with engine.begin() as conn:
-        for ddl in ddls:
-            try:
+    for ddl in ddls:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(ddl))
-                logger.info(f"Schema guard OK: {ddl}")
-            except Exception as e:
-                logger.warning(f"Schema guard failed for '{ddl}': {e}")
+                logger.info(f"Schema guard OK: {ddl[:80]}")
+        except Exception as e:
+            logger.warning(f"Schema guard skipped: {str(e)[:120]}")
 
         # NOTE: Built-in tool seeds removed — all tools now live in
         # rg_tool_registry/builtin_tools.py (unified registry, 137 tools).
