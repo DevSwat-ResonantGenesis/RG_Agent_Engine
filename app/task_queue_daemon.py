@@ -47,6 +47,7 @@ async def enqueue_task(
     max_retries: int = 3,
 ) -> str:
     """Enqueue a task for execution. Returns task_id."""
+    import json
     async with async_session() as db:
         result = await db.execute(
             text("""
@@ -58,7 +59,7 @@ async def enqueue_task(
                 "aid": agent_id,
                 "uid": user_id,
                 "goal": goal,
-                "ctx": context,
+                "ctx": json.dumps(context),
                 "src": source,
                 "sid": source_id,
                 "prio": priority,
