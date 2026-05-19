@@ -106,11 +106,16 @@ async def _poll_once() -> int:
                         {"now": now, "nxt": nxt, "sid": row["id"]},
                     )
 
-                    # Fire the session in the background
-                    asyncio.create_task(
-                        _fire_session(agent_id=agent_id, goal=goal,
-                                      context=ctx, user_id=user_id,
-                                      source=f"schedule:{row['id']}")
+                    # Enqueue task via PostgreSQL task queue
+                    from .task_queue_daemon import enqueue_task
+                    await enqueue_task(
+                        agent_id=agent_id,
+                        goal=goal,
+                        context=ctx,
+                        user_id=user_id,
+                        source="schedule",
+                        source_id=str(row["id"]),
+                        priority=5,  # Schedules get medium priority
                     )
                     fired += 1
 
@@ -164,10 +169,16 @@ async def _poll_once() -> int:
                         {"now": now, "nxt": nxt, "tid": row["id"]},
                     )
 
-                    asyncio.create_task(
-                        _fire_session(agent_id=agent_id, goal=goal,
-                                      context=cfg, user_id=None,
-                                      source=f"workflow_trigger:{row['id']}")
+                    # Enqueue task via PostgreSQL task queue
+                    from .task_queue_daemon import enqueue_task
+                    await enqueue_task(
+                        agent_id=agent_id,
+                        goal=goal,
+                        context=cfg,
+                        user_id=None,
+                        source="workflow_trigger",
+                        source_id=str(row["id"]),
+                        priority=5,
                     )
                     fired += 1
 
