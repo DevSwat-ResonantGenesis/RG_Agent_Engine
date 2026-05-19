@@ -320,9 +320,8 @@ async def _save_model_to_db(classifier, stats: dict, n_samples: int, version: in
     try:
         blob = pickle.dumps(classifier)
         async with async_session() as session:
-            await session.execute(
-                text("UPDATE agent_tool_classifier_models SET is_active = false WHERE is_active = true")
-            )
+            # Insert new model first, then deactivate old ones — avoids leaving
+            # all models inactive if the insert fails.
             await session.execute(
                 text(
                     "INSERT INTO agent_tool_classifier_models "
@@ -337,6 +336,14 @@ async def _save_model_to_db(classifier, stats: dict, n_samples: int, version: in
                     "ca": stats.get("cv_accuracy", 0),
                     "sj": json.dumps(stats),
                 },
+            )
+            # Deactivate all OTHER models after successful insert
+            await session.execute(
+                text(
+                    "UPDATE agent_tool_classifier_models SET is_active = false "
+                    "WHERE is_active = true AND version != :ver"
+                ),
+                {"ver": version},
             )
             await session.commit()
             logger.info(
@@ -509,10 +516,11 @@ class ToolClassifier:
                     from .training_data import get_training_data
                     _seed_count = len(get_training_data())
 
-                    if n_model_classes != len(ALL_TOOLS):
+                    _class_diff = abs(n_model_classes - len(ALL_TOOLS))
+                    if _class_diff > 10:
                         logger.warning(
                             f"[ToolClassifier] DB model has {n_model_classes} classes "
-                            f"but ALL_TOOLS has {len(ALL_TOOLS)} — retraining..."
+                            f"but ALL_TOOLS has {len(ALL_TOOLS)} (diff={_class_diff}) — retraining..."
                         )
                     elif n_samples < _seed_count:
                         logger.warning(

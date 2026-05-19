@@ -3110,17 +3110,22 @@ Respond in JSON:
             if _tool_mode == "manual" and _agent_tools:
                 enabled_tool_ids = set(_agent_tools)
 
-            top_tools = await tool_classifier.predict_top_n(
-                goal=goal,
-                n=12,
-                enabled_tool_ids=enabled_tool_ids,
-                user_id=str(agent.user_id) if agent.user_id else None,
+            top_tools = await asyncio.wait_for(
+                tool_classifier.predict_top_n(
+                    goal=goal,
+                    n=12,
+                    enabled_tool_ids=enabled_tool_ids,
+                    user_id=str(agent.user_id) if agent.user_id else None,
+                ),
+                timeout=10.0,
             )
             predicted_tool_names = [t[0] for t in top_tools]
             logger.info(
                 f"[TOOL_CLASSIFIER] Predicted {len(predicted_tool_names)} tools for goal: "
                 f"{predicted_tool_names[:5]}... mode={_tool_mode}"
             )
+        except asyncio.TimeoutError:
+            logger.warning("[TOOL_CLASSIFIER] Prediction timed out (10s), using fallback tool list")
         except Exception as e:
             logger.warning(f"[TOOL_CLASSIFIER] Prediction failed (using fallback): {e}")
 
