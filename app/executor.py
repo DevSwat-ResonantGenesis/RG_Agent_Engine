@@ -3278,7 +3278,11 @@ Respond in JSON:
         if "action" not in parsed:
             parsed["action"] = "respond"
             parsed.setdefault("response", parsed.get("reasoning", content[:4000]))
-            parsed.setdefault("goal_achieved", False)
+
+        # If action is "respond", default goal_achieved to True
+        # (the agent has a response to deliver — it should stop looping)
+        if parsed.get("action") == "respond" and "goal_achieved" not in parsed:
+            parsed["goal_achieved"] = True
 
         parsed["_tokens_used"] = tokens_used
         logger.info(f"[LLM] Success via {response.provider}/{response.model} ({tokens_used} tokens, fallback={response.was_fallback})")
