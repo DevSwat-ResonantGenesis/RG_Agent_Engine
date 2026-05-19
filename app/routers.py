@@ -3670,6 +3670,7 @@ async def unarchive_agent(
 # ============== Session Endpoints ==============
 
 async def _run_agent_session_background(*, session_id: str, agent_id: str) -> None:
+    print(f"[BG-AGENT] Starting background run for session={session_id} agent={agent_id}", flush=True)
     try:
         session_uuid = PyUUID(session_id)
         agent_uuid = PyUUID(agent_id)
@@ -3678,7 +3679,9 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
         return
 
     try:
+        print(f"[BG-AGENT] Acquiring semaphore...", flush=True)
         await asyncio.wait_for(_agent_run_semaphore.acquire(), timeout=30)
+        print(f"[BG-AGENT] Semaphore acquired", flush=True)
     except asyncio.TimeoutError:
         logger.error("Agent session %s could not acquire semaphore (all slots busy)", session_id)
         try:
@@ -3717,6 +3720,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
                 pass
             return
         except Exception as e:
+            print(f"[BG-AGENT] EXCEPTION: {type(e).__name__}: {e}", flush=True)
             logger.exception("Background agent run failed: %s", e)
             try:
                 async with async_session() as db_session:
@@ -3735,6 +3739,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
 
 
 async def _run_agent_session_background_inner(*, session_id: str, agent_id: str) -> None:
+    print(f"[BG-AGENT-INNER] Starting inner loop session={session_id}", flush=True)
     session_uuid = PyUUID(session_id)
     agent_uuid = PyUUID(agent_id)
 
