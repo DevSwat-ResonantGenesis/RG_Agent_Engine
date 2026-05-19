@@ -3165,12 +3165,29 @@ Respond in JSON:
         _alias = {"chatgpt": "openai", "gpt": "openai", "google": "gemini", "claude": "anthropic", "gemini": "google"}
         agent_provider = getattr(agent, "provider", None) or ""
         preferred = _alias.get(agent_provider.lower(), agent_provider.lower()) if agent_provider else None
+        agent_model = agent.model or None
+
+        # If preferred provider is not tokenrouter, check if it has an API key.
+        # If not, fall back to tokenrouter with a capable model instead of
+        # sending a provider-specific model name (e.g. llama-3.3-70b-versatile)
+        # to tokenrouter where it may not be routed correctly.
+        if preferred and preferred != "tokenrouter":
+            _env_key_map = {
+                "groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY",
+                "mistral": "MISTRAL_API_KEY", "cohere": "COHERE_API_KEY",
+            }
+            _env_name = _env_key_map.get(preferred)
+            if _env_name and not os.getenv(_env_name):
+                logger.info(f"[AGENT] Provider '{preferred}' has no key ({_env_name}), falling back to tokenrouter")
+                preferred = "tokenrouter"
+                agent_model = None  # Let tokenrouter pick the best model
 
         response = await _llm_client.complete(
             {
                 "messages": messages,
                 "provider": preferred,
-                "model": agent.model or None,
+                "model": agent_model,
                 "temperature": agent.temperature or 0.7,
                 "max_tokens": agent.max_tokens or 16384,
                 "response_format": {"type": "json_object"},
@@ -3234,6 +3251,12 @@ Respond in JSON:
                     "response": content[:4000],
                     "goal_achieved": False,
                 }
+
+        # Ensure critical fields exist after all parsing strategies
+        if "action" not in parsed:
+            parsed["action"] = "respond"
+            parsed.setdefault("response", parsed.get("reasoning", content[:4000]))
+            parsed.setdefault("goal_achieved", False)
 
         parsed["_tokens_used"] = tokens_used
         logger.info(f"[LLM] Success via {response.provider}/{response.model} ({tokens_used} tokens, fallback={response.was_fallback})")
