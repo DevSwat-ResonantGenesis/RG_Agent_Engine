@@ -373,7 +373,9 @@ async def maybe_start_scheduler():
 
 @app.on_event("startup")
 async def maybe_start_task_queue():
+    logger.info(f"[STARTUP] Task queue daemon check: AGENT_ENGINE_ENABLE_TASK_QUEUE={os.getenv('AGENT_ENGINE_ENABLE_TASK_QUEUE', 'true')}")
     if os.getenv("AGENT_ENGINE_ENABLE_TASK_QUEUE", "true").lower() != "true":
+        logger.info("[STARTUP] Task queue daemon disabled by env var")
         return
     try:
         from .task_queue_daemon import start_task_queue
