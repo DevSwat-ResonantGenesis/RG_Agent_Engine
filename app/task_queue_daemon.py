@@ -229,11 +229,13 @@ async def _daemon_loop() -> None:
 
     while _running:
         try:
+            logger.info("[TASK_QUEUE] Polling for pending tasks...")
             executed = await _poll_once()
+            logger.info(f"[TASK_QUEUE] Poll complete, executed {executed} task(s)")
             if executed:
                 logger.info(f"[TASK_QUEUE] Executed {executed} task(s)")
         except Exception as e:
-            logger.error(f"[TASK_QUEUE] Loop error: {e}")
+            logger.error(f"[TASK_QUEUE] Loop error: {e}", exc_info=True)
 
         await asyncio.sleep(POLL_INTERVAL)
 
