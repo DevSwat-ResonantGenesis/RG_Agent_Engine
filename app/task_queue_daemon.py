@@ -61,7 +61,7 @@ async def enqueue_task(
                 "goal": goal,
                 "ctx": json.dumps(context),
                 "src": source,
-                "sid": source_id,
+                "sid": source_id if source_id else None,
                 "prio": priority,
                 "max_retries": max_retries,
             },
@@ -154,6 +154,7 @@ async def _execute_task(task_id: str, agent_id: str, goal: str, context: dict, u
         await _mark_completed(task_id, "Task timeout")
         logger.error(f"[TASK_QUEUE] Task {task_id} timed out")
     except Exception as e:
+        logger.error(f"[TASK_QUEUE] Task {task_id} execution error: {e}", exc_info=True)
         # Check retry count
         async with async_session() as db:
             result = await db.execute(
