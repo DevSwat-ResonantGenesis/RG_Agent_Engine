@@ -137,6 +137,7 @@ async def _check_retry(task_id: str, retry_count: int, max_retries: int) -> bool
 async def _execute_task(task_id: str, agent_id: str, goal: str, context: dict, user_id: Optional[str]) -> None:
     """Execute a single task."""
     try:
+        logger.info(f"[TASK_QUEUE] Executing task {task_id} for agent {agent_id}")
         async with asyncio.timeout(TASK_TIMEOUT):
             from .scheduler_daemon import _fire_session_inner
 
@@ -147,8 +148,8 @@ async def _execute_task(task_id: str, agent_id: str, goal: str, context: dict, u
                 user_id=user_id,
                 source=f"task_queue:{task_id}",
             )
-            await _mark_completed(task_id)
-            logger.info(f"[TASK_QUEUE] Task {task_id} completed")
+        await _mark_completed(task_id)
+        logger.info(f"[TASK_QUEUE] Task {task_id} completed successfully")
     except asyncio.TimeoutError:
         await _mark_completed(task_id, "Task timeout")
         logger.error(f"[TASK_QUEUE] Task {task_id} timed out")
@@ -162,11 +163,13 @@ async def _execute_task(task_id: str, agent_id: str, goal: str, context: dict, u
             row = result.fetchone()
             if row:
                 retry_count, max_retries = row
-                if await _check_retry(task_id, retry_count, max_retries):
-                    return
-
-        await _mark_completed(task_id, str(e))
-        logger.error(f"[TASK_QUEUE] Task {task_id} failed: {e}")
+                should_retry = retry_count < max_retries
+                if should_retry:
+                    await _mark_retry(task_id)
+                    logger.info(f"[TASK_QUEUE] Task {task_id} failed (retry {retry_count + 1}/{max_retries}): {e}")
+                else:
+                    await _mark_failed(task_id, str(e))
+                    logger.error(f"[TASK_QUEUE] Task {task_id} failed permanently: {e}")
 
 
 # ---------------------------------------------------------------------------
