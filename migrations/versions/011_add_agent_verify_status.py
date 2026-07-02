@@ -5,14 +5,14 @@ works" — agents now carry a status (draft/verifying/active/needs_attention)
 separate from the existing is_active flag, plus a record of whether their
 assigned provider was a temporary substitute for the ideal one.
 
-Revision ID: 011_add_agent_verification_status
+Revision ID: 011_add_agent_verify_status
 Revises: 010_add_agent_avatar
 """
 
 from alembic import op
 import sqlalchemy as sa
 
-revision = "011_add_agent_verification_status"
+revision = "011_add_agent_verify_status"
 down_revision = "010_add_agent_avatar"
 branch_labels = None
 depends_on = None
