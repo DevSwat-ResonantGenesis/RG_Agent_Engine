@@ -393,6 +393,10 @@ class AgentCreate(BaseModel):
     budget_config: Optional[Dict[str, Any]] = None  # {max_tokens_per_run, max_runs_per_day}
     allowed_actions: Optional[List[str]] = None
     blocked_actions: Optional[List[str]] = None
+    status: Optional[str] = None  # draft | verifying | active | needs_attention (defaults to active if unset)
+    provider_is_temporary: Optional[bool] = None
+    provider_temporary_reason: Optional[str] = None
+    ideal_provider: Optional[str] = None
 
 
 class AgentResponse(BaseModel):
@@ -408,6 +412,10 @@ class AgentResponse(BaseModel):
     tools: Optional[List[str]]
     mode: Optional[str] = None
     is_active: bool
+    status: str = "active"
+    provider_is_temporary: bool = False
+    provider_temporary_reason: Optional[str] = None
+    ideal_provider: Optional[str] = None
     version: int
     manifest_hash: Optional[str] = None
     agent_public_hash: Optional[str] = None
@@ -1734,6 +1742,10 @@ async def create_agent(
             except (ValueError, AttributeError):
                 org_uuid = None
 
+        resolved_status = (payload.status or "active").strip().lower()
+        if resolved_status not in ("draft", "verifying", "active", "needs_attention"):
+            resolved_status = "active"
+
         agent = AgentDefinition(
             id=agent_id,
             user_id=user_uuid,
@@ -1754,6 +1766,10 @@ async def create_agent(
             agent_public_hash=agent_public_hash,
             agent_version_hash=str(safety_config.get("manifest_hash") or ""),
             agent_source=resolved_source,
+            status=resolved_status,
+            provider_is_temporary=bool(payload.provider_is_temporary),
+            provider_temporary_reason=payload.provider_temporary_reason,
+            ideal_provider=payload.ideal_provider,
         )
 
         session.add(agent)
@@ -1764,7 +1780,11 @@ async def create_agent(
         await session.commit()
         await session.refresh(agent)
 
-        await best_effort_issue_dsid_and_register(agent=agent, user_id=user_id, session=session)
+        # DSID/blockchain registration is deferred until the agent transitions
+        # to "active" (see PATCH /{agent_id}/activate) for anything not
+        # already active at creation — keeps unverified agents off-chain.
+        if agent.status == "active":
+            await best_effort_issue_dsid_and_register(agent=agent, user_id=user_id, session=session)
 
         return AgentResponse(
             id=str(agent.id),
@@ -1779,6 +1799,10 @@ async def create_agent(
             tools=agent.tools,
             mode=agent.mode,
             is_active=agent.is_active,
+            status=getattr(agent, 'status', None) or 'active',
+            provider_is_temporary=bool(getattr(agent, 'provider_is_temporary', False)),
+            provider_temporary_reason=getattr(agent, 'provider_temporary_reason', None),
+            ideal_provider=getattr(agent, 'ideal_provider', None),
             version=agent.version,
             manifest_hash=(agent.safety_config or {}).get("manifest_hash"),
             agent_public_hash=agent.agent_public_hash,
@@ -1906,6 +1930,10 @@ async def list_agents(
                     tools=a.tools,
                     mode=getattr(a, 'mode', None) or 'governed',
                     is_active=a.is_active,
+                    status=getattr(a, 'status', None) or 'active',
+                    provider_is_temporary=bool(getattr(a, 'provider_is_temporary', False)),
+                    provider_temporary_reason=getattr(a, 'provider_temporary_reason', None),
+                    ideal_provider=getattr(a, 'ideal_provider', None),
                     version=a.version,
                     manifest_hash=manifest_hash,
                     agent_public_hash=a.agent_public_hash,
@@ -2108,6 +2136,10 @@ async def instantiate_agent_template(
         max_tokens=agent.max_tokens,
         tools=agent.tools,
         is_active=agent.is_active,
+        status=getattr(agent, 'status', None) or 'active',
+        provider_is_temporary=bool(getattr(agent, 'provider_is_temporary', False)),
+        provider_temporary_reason=getattr(agent, 'provider_temporary_reason', None),
+        ideal_provider=getattr(agent, 'ideal_provider', None),
         version=agent.version,
         manifest_hash=(agent.safety_config or {}).get("manifest_hash"),
         agent_public_hash=agent.agent_public_hash,
@@ -3464,6 +3496,10 @@ async def get_agent(
         tools=agent.tools,
         mode=agent.mode,
         is_active=agent.is_active,
+        status=getattr(agent, 'status', None) or 'active',
+        provider_is_temporary=bool(getattr(agent, 'provider_is_temporary', False)),
+        provider_temporary_reason=getattr(agent, 'provider_temporary_reason', None),
+        ideal_provider=getattr(agent, 'ideal_provider', None),
         version=agent.version,
         manifest_hash=manifest_hash,
         agent_public_hash=agent.agent_public_hash,
@@ -3512,12 +3548,16 @@ async def patch_agent(
         "temperature", "max_tokens", "tools", "mode", "is_active",
         "tool_mode", "safety_config", "allowed_actions", "blocked_actions",
         "autonomous", "trigger_config", "tool_config",
+        "status", "provider_is_temporary", "provider_temporary_reason", "ideal_provider",
     }
+    was_active = getattr(agent, "status", None) == "active"
     updated = []
     for field in updatable_fields:
         if field in body:
             setattr(agent, field, body[field])
             updated.append(field)
+
+    activating_now = "status" in updated and agent.status == "active" and not was_active
 
     # Handle max_loops convenience field → store in safety_config
     if "max_loops" in body:
@@ -3537,6 +3577,12 @@ async def patch_agent(
 
     await session.commit()
     await session.refresh(agent)
+
+    # Only fire DSID/blockchain registration when the agent transitions INTO
+    # "active" — this is the sandbox-gated go-live point (kept deferred at
+    # creation time for anything saved as draft/verifying/needs_attention).
+    if activating_now:
+        await best_effort_issue_dsid_and_register(agent=agent, user_id=user_id, session=session)
 
     logger.info(f"Agent {agent_id} updated fields: {updated}")
 

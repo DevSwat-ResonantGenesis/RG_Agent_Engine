@@ -51,6 +51,16 @@ class AgentDefinition(Base):
     autonomous = Column(Boolean, default=False)  # Whether agent runs autonomously
     is_active = Column(Boolean, default=True)
     published_to_marketplace = Column(Boolean, default=False)  # Explicit opt-in to marketplace visibility
+
+    # Verification lifecycle — separate from is_active (a simple on/off flag
+    # used elsewhere). draft -> verifying -> active | needs_attention.
+    # Existing rows default to "active" for backward compatibility; new
+    # agents start in "draft" and only earn "active" (and DSID registration)
+    # after passing the build pipeline's verification checklist.
+    status = Column(String(32), default="active", nullable=False)
+    provider_is_temporary = Column(Boolean, default=False, nullable=False)
+    provider_temporary_reason = Column(Text, nullable=True)
+    ideal_provider = Column(String(64), nullable=True)
     
     # Publish-as-API (Phase 3.5)
     api_slug = Column(String(64), unique=True, index=True, nullable=True)
