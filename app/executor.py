@@ -261,6 +261,10 @@ Respond in JSON:
             "memory.read": self._tool_memory_read,
             "memory_write": self._tool_memory_write,
             "memory.write": self._tool_memory_write,
+            "memory_recall": self._tool_memory_recall,
+            "memory.recall": self._tool_memory_recall,
+            "memory_facts": self._tool_memory_facts,
+            "memory.facts": self._tool_memory_facts,
             "memory_search": self._tool_memory_read,
             "memory_stats": self._tool_memory_stats,
             # Community (rabbit)
@@ -1035,6 +1039,59 @@ Respond in JSON:
             return resp.json()
         except Exception:
             return {"ok": True}
+
+    async def _tool_memory_recall(self, tool_input: Dict[str, Any], *, session: AgentSession) -> Dict[str, Any]:
+        """Full hash-sphere recall — the complete brain (gravity + anchors + mesh +
+        cross-encoder + fact graph + temporal), not just vector search. Returns
+        memories plus confidence + answer_from_memory (no-LLM-recall signal)."""
+        query = (tool_input or {}).get("query")
+        if not query or not isinstance(query, str) or not query.strip():
+            return {"error": "Missing or invalid 'query'"}
+        try:
+            limit = max(1, min(int((tool_input or {}).get("limit", 8)), 25))
+        except Exception:
+            limit = 8
+        ctx = session.context or {}
+        payload = {
+            "query": query.strip(), "limit": limit,
+            "user_id": session.user_id, "org_id": ctx.get("org_id"),
+            "agent_hash": ctx.get("agent_hash"), "session_id": ctx.get("chat_id"),
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+        url = f"{settings.MEMORY_SERVICE_URL.rstrip('/')}/memory/hash-sphere/extract"
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                return {"error": f"memory.recall failed: HTTP {resp.status_code}", "detail": (resp.text or "")[:400]}
+            d = resp.json()
+            return {
+                "memories": d.get("memories", []),
+                "confidence": d.get("confidence", 0.0),
+                "answer_from_memory": d.get("answer_from_memory", False),
+                "methods": d.get("extraction_methods_used", []),
+            }
+        except Exception as e:
+            return {"error": f"memory.recall error: {e}"}
+
+    async def _tool_memory_facts(self, tool_input: Dict[str, Any], *, session: AgentSession) -> Dict[str, Any]:
+        """List the user's distilled atomic facts (name/role/preferences/relations),
+        entity-resolved and contradiction-superseded."""
+        ctx = session.context or {}
+        params = {"user_id": session.user_id, "limit": 100}
+        for k in ("entity", "attribute"):
+            v = (tool_input or {}).get(k)
+            if v:
+                params[k] = v
+        url = f"{settings.MEMORY_SERVICE_URL.rstrip('/')}/memory/facts"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return {"error": f"memory.facts failed: HTTP {resp.status_code}"}
+            return {"facts": resp.json().get("facts", [])}
+        except Exception as e:
+            return {"error": f"memory.facts error: {e}"}
 
     # ================================================================
     # PLATFORM ACTION TOOLS (backed by shared/tools/)
