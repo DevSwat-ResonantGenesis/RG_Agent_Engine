@@ -1,6 +1,6 @@
 # RG Agent Engine
 
-> **Part of the [ResonantGenesis](https://dev-swat.com) platform** — Autonomous agent execution framework with neural tool classifier, goal pursuit, multi-agent orchestration, 200+ tools, BYOK LLM routing, and safety-governed execution loops.
+> **Part of the [ResonantGenesis](https://resonant.dev-swat.com) platform** — Autonomous agent execution framework with neural tool classifier, goal pursuit, multi-agent orchestration, 200+ tools, BYOK LLM routing, and safety-governed execution loops.
 
 [![Status: Production](https://img.shields.io/badge/Status-Production-brightgreen.svg)]()
 [![License: RG Source Available](https://img.shields.io/badge/License-RG%20Source%20Available-blue.svg)](LICENSE.txt)
@@ -698,7 +698,7 @@ agent_engine_service:
 
 ### Deploy Path
 
-- **Server:** `deploy@dev-swat.com`
+- **Server:** `deploy@resonant.dev-swat.com`
 - **Code path:** `/home/deploy/RG_Agent_Engine`
 - **Container name:** `agent_engine_service`
 - **Port:** `8000` (internal Docker network)
@@ -708,7 +708,7 @@ agent_engine_service:
 
 ```bash
 # SSH into server
-ssh deploy@dev-swat.com
+ssh deploy@resonant.dev-swat.com
 
 # Rebuild just agent engine
 cd /home/deploy/genesis2026_production_backend
@@ -808,4 +808,4 @@ Test files:
 
 ---
 
-**Organization**: [DevSwat-ResonantGenesis](https://github.com/DevSwat-ResonantGenesis) | **Platform**: [dev-swat.com](https://dev-swat.com)
+**Organization**: [DevSwat-ResonantGenesis](https://github.com/DevSwat-ResonantGenesis) | **Platform**: [resonant.dev-swat.com](https://resonant.dev-swat.com)
