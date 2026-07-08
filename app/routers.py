@@ -34,7 +34,7 @@ BLOCKCHAIN_SERVICE_URL = os.getenv("BLOCKCHAIN_SERVICE_URL", "http://blockchain_
 RARA_SERVICE_URL = os.getenv("RARA_SERVICE_URL", "http://rg_internal_invarients_sim:8093")
 BILLING_SERVICE_URL = os.getenv("BILLING_SERVICE_URL", "http://billing_service:8000").rstrip("/")
 BASE_PUBLISH_CREDITS = int(os.getenv("BASE_PUBLISH_CREDITS", "250"))
-BUY_CREDITS_URL = os.getenv("BUY_CREDITS_URL", "https://resonant.dev-swat.com/billing")
+BUY_CREDITS_URL = os.getenv("BUY_CREDITS_URL", "https://dev-swat.com/billing")
 LLM_SERVICE_URL = os.getenv("LLM_SERVICE_URL", "http://llm_service:8000").rstrip("/")
 
 logger = logging.getLogger(__name__)

@@ -396,7 +396,7 @@ Respond in JSON:
             "a=os.environ.get('ACCEPT','*/*');"
             "t=float(os.environ.get('TIMEOUT','10'));"
             "m=int(os.environ.get('MAX_BYTES','1048576'));"
-            "hdr={'User-Agent':'Genesis2026-AgentEngine/1.0 (+https://resonant.dev-swat.com)','Accept':a};"
+            "hdr={'User-Agent':'Genesis2026-AgentEngine/1.0 (+https://dev-swat.com)','Accept':a};"
             "out={};"
             "\ntry:\n"
             " req=urllib.request.Request(u,headers=hdr);"
@@ -1236,7 +1236,7 @@ Respond in JSON:
 
         # Direct HTTP for all methods (with security already validated above)
         headers = {
-            "User-Agent": "Genesis2026-AgentEngine/1.0 (+https://resonant.dev-swat.com)",
+            "User-Agent": "Genesis2026-AgentEngine/1.0 (+https://dev-swat.com)",
             "Accept": "application/json, text/plain, */*",
         }
         headers.update(extra_headers)

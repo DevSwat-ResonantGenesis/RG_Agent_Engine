@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
-PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "resonant.dev-swat.com")
+PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "dev-swat.com")
 
 
 # ============================================
