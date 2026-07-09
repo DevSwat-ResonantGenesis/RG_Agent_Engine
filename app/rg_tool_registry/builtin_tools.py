@@ -173,6 +173,8 @@ MEDIA_TOOLS = [
                 ToolParam("model", ParamType.STRING, "TTS model", enum=["tts-1", "tts-1-hd"], default="tts-1"),
             ],
             handler="generate_audio", access={_R, _A}, requires_api_key="openai", priority=35, max_result_chars=2000),
+    ToolDef(name="finalize_audio_podcast", description="Combine every generate_audio segment produced so far in the current session into one downloadable MP3, with short pauses between speakers. Call this once after generating all narrator/character audio segments for a story or podcast.", category=ToolCategory.MEDIA,
+            params=[], handler="finalize_audio_podcast", access={_R, _A}, priority=36, max_result_chars=1000),
     ToolDef(name="generate_music", description="Generate music from text.", category=ToolCategory.MEDIA,
             params=[ToolParam("prompt", ParamType.STRING, "music description", required=True)],
             handler="generate_music", access={_R, _A}, requires_api_key="suno", priority=40, max_result_chars=2000),

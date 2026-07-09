@@ -3,6 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 EXPOSE 8000
 
+# ffmpeg is required by pydub (finalize_audio_podcast) to decode/encode/concat MP3 segments
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

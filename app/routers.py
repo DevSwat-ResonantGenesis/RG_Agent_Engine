@@ -2179,6 +2179,48 @@ async def list_available_tools():
     ]
 
 
+@router.get("/audio/{session_id}")
+async def download_session_audio(
+    session_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Download the finalized podcast MP3 produced by finalize_audio_podcast for a session."""
+    from fastapi.responses import Response
+
+    user_id = request.headers.get("x-user-id")
+    user_role = (request.headers.get("x-user-role") or "user").strip().lower()
+    is_superuser = (request.headers.get("x-is-superuser") or "").strip().lower() in {"1", "true", "yes", "on"}
+    is_privileged = is_superuser or user_role in ("platform_owner", "admin")
+
+    try:
+        session_uuid = PyUUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+    result = await session.execute(select(AgentSession).where(AgentSession.id == session_uuid))
+    agent_session = result.scalar_one_or_none()
+    if not agent_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not is_privileged and user_id and agent_session.user_id and str(agent_session.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session's audio")
+
+    owner_id = str(agent_session.user_id) if agent_session.user_id else "anonymous"
+    file_path = f"/opt/resonant/user_workspaces/{owner_id}/audio_podcasts/{session_id}.mp3"
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="No finalized audio found for this session — call finalize_audio_podcast first.")
+
+    with open(file_path, "rb") as f:
+        data = f.read()
+
+    return Response(
+        content=data,
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": f'attachment; filename="podcast_{session_id[:8]}.mp3"'},
+    )
+
+
 @router.post("/tools/execute")
 async def execute_tool_direct(request: Request):
     """Execute a platform tool directly (no agent session required).

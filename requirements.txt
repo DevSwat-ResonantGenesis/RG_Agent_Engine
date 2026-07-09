@@ -23,3 +23,5 @@ scikit-learn>=1.3.0
 numpy>=1.24.0
 # Free no-API-key TTS fallback for generate_audio
 gtts>=2.5.0
+# Audio concatenation for finalize_audio_podcast (requires system ffmpeg, see Dockerfile)
+pydub>=0.25.1

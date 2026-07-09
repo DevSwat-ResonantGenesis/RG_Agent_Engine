@@ -295,6 +295,7 @@ Respond in JSON:
             "image_gen.generate": self._tool_generate_image,
             "image_generation": self._tool_generate_image,
             "generate_audio": self._tool_generate_audio,
+            "finalize_audio_podcast": self._tool_finalize_audio_podcast,
             "generate_music": self._tool_generate_music,
             "generate_video": self._tool_generate_video,
             "generate_chart": self._tool_generate_chart,
@@ -2226,6 +2227,87 @@ Respond in JSON:
         except Exception as e:
             print(f"[GENERATE_AUDIO] Exception: {e}", flush=True)
             return {"error": f"Audio generation failed: {str(e)}"}
+
+    async def _tool_finalize_audio_podcast(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Concatenate every generate_audio segment produced so far in this session into one downloadable MP3.
+
+        Reads prior generate_audio results back from AgentStep rows (not in-memory
+        state) so it works regardless of which process handled each earlier call.
+        """
+        if not session or not getattr(session, "id", None):
+            return {"error": "No active session — finalize_audio_podcast must be called from within an agent session."}
+
+        session_id = str(session.id)
+        user_id = str(getattr(session, "user_id", None) or "anonymous")
+
+        from .db import async_session as _async_session
+        from .models import AgentStep as _AgentStep
+        from sqlalchemy import select as _select
+
+        async with _async_session() as db:
+            result = await db.execute(
+                _select(_AgentStep)
+                .where(_AgentStep.session_id == session.id)
+                .where(_AgentStep.tool_name == "generate_audio")
+                .order_by(_AgentStep.step_number.asc())
+            )
+            steps = result.scalars().all()
+
+        segments_b64 = [
+            step.tool_output["audio_base64"]
+            for step in steps
+            if isinstance(step.tool_output, dict) and step.tool_output.get("success") and step.tool_output.get("audio_base64")
+        ]
+
+        if not segments_b64:
+            return {
+                "error": "No successful generate_audio segments found in this session yet. "
+                         "Call generate_audio for each speaker/segment first, then call finalize_audio_podcast."
+            }
+
+        def _combine():
+            import base64
+            import io
+            from pydub import AudioSegment
+
+            combined = AudioSegment.empty()
+            gap = AudioSegment.silent(duration=350)
+            for i, b64 in enumerate(segments_b64):
+                raw = base64.b64decode(b64)
+                seg = AudioSegment.from_file(io.BytesIO(raw), format="mp3")
+                if i > 0:
+                    combined += gap
+                combined += seg
+            out_buf = io.BytesIO()
+            combined.export(out_buf, format="mp3", bitrate="128k")
+            return out_buf.getvalue(), len(combined)
+
+        try:
+            final_bytes, duration_ms = await asyncio.to_thread(_combine)
+        except Exception as e:
+            print(f"[FINALIZE_AUDIO] Combine failed: {e}", flush=True)
+            return {"error": f"Failed to combine audio segments: {str(e)}"}
+
+        out_dir = f"/opt/resonant/user_workspaces/{user_id}/audio_podcasts"
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = f"{out_dir}/{session_id}.mp3"
+        with open(out_path, "wb") as f:
+            f.write(final_bytes)
+
+        print(
+            f"[FINALIZE_AUDIO] SUCCESS: {len(segments_b64)} segments, {len(final_bytes)} bytes, "
+            f"{duration_ms / 1000:.1f}s -> {out_path}",
+            flush=True,
+        )
+
+        return {
+            "success": True,
+            "segments_combined": len(segments_b64),
+            "duration_seconds": round(duration_ms / 1000.0, 1),
+            "size_bytes": len(final_bytes),
+            "download_url": f"/agents/audio/{session_id}",
+            "note": "download_url is a relative API path on the platform's backend — fetch it with the user's auth to get the finished MP3.",
+        }
 
     async def _tool_generate_music(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
         """Generate music/songs using Suno API with the user's API key (BYOK)."""
