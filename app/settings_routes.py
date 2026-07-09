@@ -49,6 +49,7 @@ class AgentUpdateRequest(BaseModel):
     patches: Optional[List[int]] = None
     tool_mode: Optional[str] = None  # smart or manual
     tools: Optional[List[str]] = None
+    tool_config: Optional[dict] = None  # per-tool config, e.g. {"generate_audio": {"voices": ["alloy", "nova"]}}
     personality_config: Optional[dict] = None
     patch_config: Optional[dict] = None
     memory_config: Optional[dict] = None
@@ -499,6 +500,8 @@ async def update_agent(
             agent.tool_mode = resolved
     if payload.tools is not None:
         agent.tools = payload.tools
+    if payload.tool_config is not None:
+        agent.tool_config = payload.tool_config
 
     if payload.patches is not None:
         safety_config["enabledPatches"] = payload.patches

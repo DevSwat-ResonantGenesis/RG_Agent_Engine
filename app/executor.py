@@ -1296,7 +1296,10 @@ Respond in JSON:
         if inputs and isinstance(inputs, list):
             payload["inputs"] = inputs
 
-        headers = {}
+        # code_execution_service requires this on every route (see its app/security.py) —
+        # without it, any container reachable on app-network could run arbitrary shell
+        # commands there (it has /var/run/docker.sock mounted for its own sandboxing).
+        headers = {"x-internal-service-key": os.getenv("CODE_EXECUTION_INTERNAL_SERVICE_KEY", "")}
         if session and session.user_id:
             headers["x-user-id"] = str(session.user_id)
 
@@ -3136,23 +3139,42 @@ Respond in JSON:
             logger.warning(f"[BYOK-EXEC] Failed to fetch keys for {user_id}: {e}")
         return {}
 
-    def _build_tools_section(self, predicted_tools: List[str]) -> str:
+    def _build_tools_section(self, predicted_tools: List[str], tool_config: Optional[Dict[str, Any]] = None) -> str:
         """Build the tools section for EXECUTION_FRAME from classifier predictions."""
         if not predicted_tools:
             # Fallback: list handler_map keys (legacy behavior)
             all_names = sorted(self._handler_map.keys())
-            return (
+            section = (
                 f"You have access to {len(all_names)}+ tools and 44 platform services (560+ APIs). Call any by name.\n"
                 f"Tools: {', '.join(all_names[:20])}, etc."
             )
-        tool_names = [t for t in predicted_tools if t in self._handler_map]
-        if not tool_names:
-            tool_names = list(self._handler_map.keys())[:15]
-        return (
-            f"You have access to {len(self._handler_map)}+ tools. Best matches for this goal:\n"
-            f"Tools: {', '.join(tool_names)}\n"
-            f"You may also call any other tool by exact name (discover_services, platform_api, etc.)."
-        )
+        else:
+            tool_names = [t for t in predicted_tools if t in self._handler_map]
+            if not tool_names:
+                tool_names = list(self._handler_map.keys())[:15]
+            section = (
+                f"You have access to {len(self._handler_map)}+ tools. Best matches for this goal:\n"
+                f"Tools: {', '.join(tool_names)}\n"
+                f"You may also call any other tool by exact name (discover_services, platform_api, etc.)."
+            )
+
+        # Surface any per-tool config the user set in the agent editor (e.g. an
+        # approved voice palette for generate_audio) so the model actually
+        # uses it instead of inventing its own parameter values.
+        if tool_config:
+            hints = []
+            for tool_name, cfg in tool_config.items():
+                if not isinstance(cfg, dict):
+                    continue
+                voices = cfg.get("voices")
+                if isinstance(voices, list) and voices:
+                    hints.append(
+                        f"- {tool_name}: use ONLY these voices (vary per character/segment): {', '.join(voices)}"
+                    )
+            if hints:
+                section += "\n\nTool configuration set by the user — follow exactly:\n" + "\n".join(hints)
+
+        return section
 
     async def _get_next_action(
         self,
@@ -3198,7 +3220,7 @@ Respond in JSON:
         except Exception as e:
             logger.warning(f"[TOOL_CLASSIFIER] Prediction failed (using fallback): {e}")
 
-        tools_section = self._build_tools_section(predicted_tool_names)
+        tools_section = self._build_tools_section(predicted_tool_names, getattr(agent, "tool_config", None))
 
         prompt = self.EXECUTION_FRAME.format(
             goal=goal,
