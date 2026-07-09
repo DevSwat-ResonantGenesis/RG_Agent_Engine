@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MAX_LOOP_ITERATIONS: int = 200
     MAX_TOKENS_PER_RUN: int = 500000
     MAX_TOOL_CALLS_PER_STEP: int = 20
-    SAFETY_TIMEOUT_SECONDS: int = 300
+    SAFETY_TIMEOUT_SECONDS: int = 900
     
     # Agent defaults
     DEFAULT_MODEL: str = "google/gemini-3-flash-preview"
