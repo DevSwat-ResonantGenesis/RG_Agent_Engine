@@ -166,7 +166,7 @@ MEDIA_TOOLS = [
     ToolDef(name="generate_image", description="Generate an AI image from text.", category=ToolCategory.MEDIA,
             params=[ToolParam("prompt", ParamType.STRING, "image description", required=True)],
             handler="generate_image", access={_R, _A}, requires_api_key="openai", priority=30, max_result_chars=2000),
-    ToolDef(name="generate_audio", description="Generate speech from text (TTS). Call once per speaker/segment — pick a different voice per character for multi-voice narration.", category=ToolCategory.MEDIA,
+    ToolDef(name="generate_audio", description="Generate speech from text (TTS). Call once per speaker/segment — pick a different voice per character for multi-voice narration. Uses OpenAI TTS if the user has an API key, otherwise falls back to free Google TTS automatically.", category=ToolCategory.MEDIA,
             params=[
                 ToolParam("text", ParamType.STRING, "text to speak", required=True),
                 ToolParam("voice", ParamType.STRING, "voice to speak with", enum=["alloy", "echo", "fable", "onyx", "nova", "shimmer"], default="alloy"),

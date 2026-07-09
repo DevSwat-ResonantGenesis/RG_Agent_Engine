@@ -2122,22 +2122,69 @@ Respond in JSON:
         except Exception as e:
             return {"error": f"DALL-E generation failed: {str(e)}"}
 
+    # gTTS has no real distinct voices (one Google voice per language), so we
+    # fake per-character variety by spreading our 6 named voices across
+    # different English accent TLDs — same `voice` param agents already use.
+    _GTTS_VOICE_MAP = {
+        "alloy": {"lang": "en", "tld": "com"},     # US
+        "echo": {"lang": "en", "tld": "co.uk"},    # British
+        "fable": {"lang": "en", "tld": "ie"},      # Irish — warm storytelling tone
+        "onyx": {"lang": "en", "tld": "com.au"},   # Australian
+        "nova": {"lang": "en", "tld": "co.in"},    # Indian
+        "shimmer": {"lang": "en", "tld": "ca"},    # Canadian
+    }
+
+    async def _generate_audio_gtts(self, text: str, voice: str) -> Dict[str, Any]:
+        """Free, no-API-key TTS fallback using Google Translate's TTS endpoint (gTTS)."""
+        import base64
+        import io
+
+        def _synthesize() -> bytes:
+            from gtts import gTTS
+            cfg = self._GTTS_VOICE_MAP.get(voice, self._GTTS_VOICE_MAP["alloy"])
+            tts = gTTS(text=text[:4096], lang=cfg["lang"], tld=cfg["tld"])
+            buf = io.BytesIO()
+            tts.write_to_fp(buf)
+            return buf.getvalue()
+
+        try:
+            audio_bytes = await asyncio.to_thread(_synthesize)
+        except Exception as e:
+            print(f"[GENERATE_AUDIO] gTTS fallback failed: {e}", flush=True)
+            return {
+                "error": f"Free TTS fallback failed: {str(e)}. Add an OpenAI API key in Settings > API Keys for reliable audio generation.",
+            }
+
+        print(f"[GENERATE_AUDIO] gTTS SUCCESS: {len(audio_bytes)} bytes, voice={voice}", flush=True)
+        return {
+            "success": True,
+            "audio_base64": base64.b64encode(audio_bytes).decode("utf-8"),
+            "format": "mp3",
+            "voice": voice,
+            "model": "gtts-free",
+            "provider": "gtts",
+            "text_length": len(text),
+            "note": (
+                "Generated with free Google TTS (no API key) — accent varies by "
+                "voice, not a truly distinct speaker. Add an OpenAI API key in "
+                "Settings > API Keys for higher-quality, more distinct multi-voice narration."
+            ),
+        }
+
     async def _tool_generate_audio(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
-        """Generate speech audio using OpenAI TTS with the user's API key (BYOK)."""
+        """Generate speech audio — OpenAI TTS (BYOK) if the user has a key, else a free gTTS fallback."""
         text = (tool_input or {}).get("text", "").strip()
         if not text:
             return {"error": "Missing 'text' — provide the text to convert to speech."}
 
-        openai_key = await self._get_user_api_key(session, "openai")
-        if not openai_key:
-            return {
-                "error": "No OpenAI API key found. To generate audio, add your OpenAI API key in Settings > API Keys.",
-                "help": "Go to Settings > API Keys and add your OpenAI key to enable text-to-speech.",
-            }
-
         voice = (tool_input or {}).get("voice", "alloy")
         if voice not in ("alloy", "echo", "fable", "onyx", "nova", "shimmer"):
             voice = "alloy"
+
+        openai_key = await self._get_user_api_key(session, "openai")
+        if not openai_key:
+            return await self._generate_audio_gtts(text, voice)
+
         model = (tool_input or {}).get("model", "tts-1")
         if model not in ("tts-1", "tts-1-hd"):
             model = "tts-1"
