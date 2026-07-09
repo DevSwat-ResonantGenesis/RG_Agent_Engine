@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     ED_SERVICE_URL: str = os.getenv("ED_SERVICE_URL", "http://ed_service:8000")
     
     # Safety limits
-    MAX_LOOP_ITERATIONS: int = 200
-    MAX_TOKENS_PER_RUN: int = 500000
-    MAX_TOOL_CALLS_PER_STEP: int = 20
-    SAFETY_TIMEOUT_SECONDS: int = 900
+    MAX_LOOP_ITERATIONS: int = 250
+    MAX_TOKENS_PER_RUN: int = 1000000
+    MAX_TOOL_CALLS_PER_STEP: int = 50  # currently unused — no code path reads this
+    SAFETY_TIMEOUT_SECONDS: int = 600
     
     # Agent defaults
     DEFAULT_MODEL: str = "google/gemini-3-flash-preview"
