@@ -41,6 +41,7 @@ class TeamResponse(BaseModel):
     created_at: str
     updated_at: Optional[str]
     member_count: int
+    is_public: bool = False
     metadata: Dict[str, Any] = {}
 
 
@@ -163,6 +164,7 @@ async def create_team(
         created_at=team.created_at.isoformat(),
         updated_at=team.updated_at.isoformat() if team.updated_at else None,
         member_count=len(team.member_agent_ids) if team.member_agent_ids else 0,
+        is_public=bool(team.is_public),
     )
 
 
@@ -200,11 +202,83 @@ async def list_teams(
             created_at=t.created_at.isoformat(),
             updated_at=t.updated_at.isoformat() if t.updated_at else None,
             member_count=len(t.member_agent_ids) if t.member_agent_ids else 0,
+            is_public=bool(t.is_public),
         )
         for t in teams
     ]
 
 
+@router.get("/my-rentals", response_model=List[RentalResponse])
+async def list_my_rentals(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """List teams rented by current user."""
+    user_id = _get_user_id(request)
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    result = await session.execute(
+        select(AgentTeamRental).where(AgentTeamRental.renter_id == user_id)
+    )
+    rentals = result.scalars().all()
+
+    return [
+        RentalResponse(
+            rental_id=str(r.id),
+            team_id=str(r.team_id),
+            renter_id=str(r.renter_id),
+            start_date=r.started_at.isoformat(),
+            end_date=r.expires_at.isoformat(),
+            daily_rate=(r.price_per_hour or 0) * 24,
+            total_cost=r.total_price,
+            status=r.status,
+        )
+        for r in rentals
+    ]
+
+
+# ============================================
+# Marketplace Endpoints
+# ============================================
+
+@router.get("/marketplace", response_model=List[MarketplaceListingResponse])
+async def list_marketplace(
+    session: AsyncSession = Depends(get_session),
+):
+    """List teams available in the marketplace."""
+    result = await session.execute(
+        select(AgentTeam).where(
+            AgentTeam.is_public == True,
+            AgentTeam.status == "active",
+        )
+    )
+    teams = result.scalars().all()
+
+    return [
+        MarketplaceListingResponse(
+            team_id=str(t.id),
+            name=t.name,
+            description=t.description,
+            owner_id=str(t.user_id),
+            is_nft=bool(t.nft_token_id),
+            listing_price=None,  # Would come from marketplace listing
+            rent_price_per_day=(t.rental_price_per_hour or 0) * 24 if t.is_rentable else None,
+            rating=None,
+            total_rentals=0,  # Would be calculated from rentals
+            member_count=len(t.member_agent_ids) if t.member_agent_ids else 0,
+        )
+        for t in teams
+    ]
+
+
+# NOTE: the routes above (my-rentals, marketplace) MUST stay registered
+# before /{team_id} below — Starlette matches routes in registration order,
+# and a bare "/{team_id}" path param would otherwise swallow "GET
+# /agent-teams/marketplace" as a lookup for a team literally named
+# "marketplace" (and similarly for "my-rentals"), 500'ing on the UUID cast
+# and never reaching the real handler. This is why both were unreachable.
 @router.get("/{team_id}", response_model=TeamResponse)
 async def get_team(
     team_id: str,
@@ -230,6 +304,7 @@ async def get_team(
         created_at=team.created_at.isoformat(),
         updated_at=team.updated_at.isoformat() if team.updated_at else None,
         member_count=len(team.member_agent_ids) if team.member_agent_ids else 0,
+        is_public=bool(team.is_public),
     )
 
 
@@ -324,6 +399,7 @@ async def archive_team(
         created_at=team.created_at.isoformat(),
         updated_at=team.updated_at.isoformat() if team.updated_at else None,
         member_count=len(team.member_agent_ids) if team.member_agent_ids else 0,
+        is_public=bool(team.is_public),
     )
 
 
@@ -366,7 +442,39 @@ async def unarchive_team(
         created_at=team.created_at.isoformat(),
         updated_at=team.updated_at.isoformat() if team.updated_at else None,
         member_count=len(team.member_agent_ids) if team.member_agent_ids else 0,
+        is_public=bool(team.is_public),
     )
+
+
+@router.post("/{team_id}/marketplace-publish")
+async def toggle_team_marketplace_publish(
+    team_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Toggle a team's marketplace visibility (is_public). Owner-only.
+
+    GET /agent-teams/marketplace only ever returns teams where is_public is
+    True — before this endpoint, nothing in this router could ever set that
+    column, so the teams marketplace was permanently empty.
+    """
+    user_id = _get_user_id(request)
+
+    result = await session.execute(
+        select(AgentTeam).where(AgentTeam.id == team_id)
+    )
+    team = result.scalar_one_or_none()
+
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    if str(team.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to publish this team")
+
+    team.is_public = not team.is_public
+    await session.commit()
+
+    return {"team_id": str(team.id), "is_public": team.is_public}
 
 
 # ============================================
@@ -825,69 +933,4 @@ async def list_team_rentals(
             status=r.status,
         )
         for r in rentals
-    ]
-
-
-@router.get("/my-rentals", response_model=List[RentalResponse])
-async def list_my_rentals(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-):
-    """List teams rented by current user."""
-    user_id = _get_user_id(request)
-    
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    result = await session.execute(
-        select(AgentTeamRental).where(AgentTeamRental.renter_id == user_id)
-    )
-    rentals = result.scalars().all()
-    
-    return [
-        RentalResponse(
-            rental_id=str(r.id),
-            team_id=str(r.team_id),
-            renter_id=str(r.renter_id),
-            start_date=r.started_at.isoformat(),
-            end_date=r.expires_at.isoformat(),
-            daily_rate=(r.price_per_hour or 0) * 24,
-            total_cost=r.total_price,
-            status=r.status,
-        )
-        for r in rentals
-    ]
-
-
-# ============================================
-# Marketplace Endpoints
-# ============================================
-
-@router.get("/marketplace", response_model=List[MarketplaceListingResponse])
-async def list_marketplace(
-    session: AsyncSession = Depends(get_session),
-):
-    """List teams available in the marketplace."""
-    result = await session.execute(
-        select(AgentTeam).where(
-            AgentTeam.is_public == True,
-            AgentTeam.status == "active",
-        )
-    )
-    teams = result.scalars().all()
-    
-    return [
-        MarketplaceListingResponse(
-            team_id=str(t.id),
-            name=t.name,
-            description=t.description,
-            owner_id=str(t.user_id),
-            is_nft=bool(t.nft_token_id),
-            listing_price=None,  # Would come from marketplace listing
-            rent_price_per_day=(t.rental_price_per_hour or 0) * 24 if t.is_rentable else None,
-            rating=None,
-            total_rentals=0,  # Would be calculated from rentals
-            member_count=len(t.member_agent_ids) if t.member_agent_ids else 0,
-        )
-        for t in teams
     ]
