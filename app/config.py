@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     )
     CHAT_SERVICE_URL: str = os.getenv("CHAT_SERVICE_URL", "http://chat_service:8000")
     ED_SERVICE_URL: str = os.getenv("ED_SERVICE_URL", "http://ed_service:8000")
+    GATEWAY_URL: str = os.getenv("GATEWAY_URL", "http://gateway:8000")
     
     # Safety limits
     MAX_LOOP_ITERATIONS: int = 250
