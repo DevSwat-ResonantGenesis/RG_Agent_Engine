@@ -3415,11 +3415,11 @@ Respond in JSON:
 
         # === NEURAL TOOL CLASSIFIER: predict relevant tools for this goal ===
         predicted_tool_names = []
+        _tool_mode = getattr(agent, "tool_mode", "smart") or "smart"
+        _agent_tools = getattr(agent, "tools", None)
         try:
             # Determine enabled tools based on agent config
             enabled_tool_ids = None  # None = all tools
-            _tool_mode = getattr(agent, "tool_mode", "smart") or "smart"
-            _agent_tools = getattr(agent, "tools", None)
 
             if _tool_mode == "manual" and _agent_tools:
                 enabled_tool_ids = set(_agent_tools)
@@ -3442,6 +3442,18 @@ Respond in JSON:
             logger.warning("[TOOL_CLASSIFIER] Prediction timed out (10s), using fallback tool list")
         except Exception as e:
             logger.warning(f"[TOOL_CLASSIFIER] Prediction failed (using fallback): {e}")
+
+        # The classifier only ranks tools it has semantic training signal for —
+        # a brand-new or rarely-used tool the agent's own config explicitly
+        # lists (e.g. run_agent_team) can rank outside its top-12 and never get
+        # surfaced, even though the agent's system_prompt tells the model to
+        # call it by name. Always show the agent's own configured tools too,
+        # regardless of tool_mode, so what the prompt instructs matches what's
+        # actually listed as callable.
+        if _agent_tools:
+            for t in _agent_tools:
+                if t in self._handler_map and t not in predicted_tool_names:
+                    predicted_tool_names.append(t)
 
         tools_section = self._build_tools_section(predicted_tool_names, getattr(agent, "tool_config", None))
 
