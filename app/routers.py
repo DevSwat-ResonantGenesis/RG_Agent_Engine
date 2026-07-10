@@ -4506,12 +4506,31 @@ async def _resume_session_after_approval(session_id: str):
             if not agent:
                 return
 
+            # Reconstruct prior-step context so the LLM doesn't resume with
+            # amnesia about everything before the approval gate (see
+            # _run_loop_inner's resume_history param).
+            steps_result = await db_session.execute(
+                select(AgentStep).where(AgentStep.session_id == agent_session.id).order_by(AgentStep.step_number)
+            )
+            resume_history = [
+                {
+                    "action": s.step_type,
+                    "tool_name": s.tool_name,
+                    "tool_input": s.tool_input,
+                    "result": s.tool_output,
+                    "reasoning": s.reasoning,
+                    "response": (s.output_data or {}).get("response") if isinstance(s.output_data, dict) else None,
+                }
+                for s in steps_result.scalars().all()
+            ]
+
             # Re-enter the execution loop
             await agent_executor._run_loop_inner(
                 session=agent_session,
                 agent=agent,
                 db_session=db_session,
                 _step_history=[],
+                resume_history=resume_history,
             )
             await db_session.commit()
     except Exception as e:

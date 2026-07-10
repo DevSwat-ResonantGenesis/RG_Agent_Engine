@@ -27,8 +27,8 @@ from .models import (
 )
 from .safety import safety_envelope, approval_manager
 from .planner import tool_planner, goal_decomposer
-from .verifier import verifier_agent, VerificationResult, VerificationReport
-from .loop_stabilizer import loop_stabilizer, StabilityAction
+from .verifier import VerifierAgent, VerificationResult, VerificationReport
+from .loop_stabilizer import LoopStabilizer, StabilityConfig, StabilityAction
 from .policy_engine import (
     get_policy_engine, PolicyContext, PolicyDecision, AutonomyMode
 )
@@ -2503,6 +2503,7 @@ Respond in JSON:
         agent: AgentDefinition,
         db_session: AsyncSession,
         _step_history: list,
+        resume_history: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Inner run loop — separated to enable learning wrapper."""
         # === EMPTY/MEANINGLESS GOAL INTERCEPTOR ===
@@ -2653,12 +2654,23 @@ Respond in JSON:
         db_session.add(plan)
         await db_session.commit()
 
-        history = []
-        
-        # Reset verifier and stabilizer for new session
-        verifier_agent.reset()
-        loop_stabilizer.reset()
-        
+        # When resuming after a human approval gate, seed with the prior
+        # steps' context instead of starting the LLM's reasoning from
+        # scratch — it previously always reset to [] here even on resume,
+        # so an approved/rejected session forgot everything before the gate
+        # and effectively restarted its whole plan, which looked like
+        # "approve does nothing."
+        history = list(resume_history) if resume_history else []
+
+        # Verifier and loop-stabilizer are created fresh PER SESSION here —
+        # they used to be shared module-level singletons (just .reset() at
+        # session start), which meant two sessions running concurrently in
+        # the same process interleaved their step/iteration state and could
+        # trip each other's "max iterations reached" / "infinite loop
+        # detected" aborts even though neither session actually misbehaved.
+        _verifier = VerifierAgent()
+        _stabilizer = LoopStabilizer(StabilityConfig(max_iterations=settings.MAX_LOOP_ITERATIONS))
+
         try:
             # Per-agent max_loops from safety_config, fallback to global setting
             _agent_max_loops = settings.MAX_LOOP_ITERATIONS
@@ -2722,7 +2734,7 @@ Respond in JSON:
                 # === VERIFICATION STEP (lightweight, no LLM call) ===
                 # Use hash-based loop detection only — the full LLM verifier
                 # doubles every LLM call and causes rate-limit hangs with Groq.
-                loop_check = verifier_agent._check_for_loops(
+                loop_check = _verifier._check_for_loops(
                     step_input=step_result.get("tool_input", {}),
                     step_output=step_result.get("result", {}),
                 )
@@ -2733,7 +2745,7 @@ Respond in JSON:
                 )
                 
                 # === LOOP STABILIZATION ===
-                stability = loop_stabilizer.record_step(
+                stability = _stabilizer.record_step(
                     step_type=step_result.get("action", "unknown"),
                     step_input=step_result.get("tool_input", {}),
                     step_output=step_result.get("result", {}),
@@ -2751,7 +2763,7 @@ Respond in JSON:
                     return {"status": "failed", "error": stability.reason}
                 
                 if stability.action == StabilityAction.ROLLBACK:
-                    checkpoint = loop_stabilizer.get_latest_checkpoint()
+                    checkpoint = _stabilizer.get_latest_checkpoint()
                     if checkpoint:
                         # Restore from checkpoint
                         session.context = checkpoint.get("data", {}).get("context", session.context)
@@ -2807,8 +2819,8 @@ Respond in JSON:
                     return {"status": "failed", "error": "Infinite loop detected"}
                 
                 # Create checkpoint if recommended
-                if loop_stabilizer.should_create_checkpoint():
-                    loop_stabilizer.create_checkpoint({
+                if _stabilizer.should_create_checkpoint():
+                    _stabilizer.create_checkpoint({
                         "context": session.context,
                         "history": history[-10:],
                         "plan": plan_data,
