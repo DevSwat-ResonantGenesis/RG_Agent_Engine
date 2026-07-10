@@ -37,6 +37,7 @@ from ..project_builder import (
     ProjectState,
 )
 from ..db import get_session
+from ..scope_check import require_scope
 
 logger = logging.getLogger(__name__)
 
@@ -475,16 +476,19 @@ class FrontendProjectResponse(BaseModel):
 async def generate_project_frontend_compatible(
     request: FrontendProjectRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request,
     current_user: dict = Depends(get_current_user),
 ):
     """
     Frontend-compatible project generation endpoint.
-    
+
     This endpoint matches the frontend's expected API format at /code/project/generate.
     It wraps the Project Builder agent for compatibility.
-    
+
     **Authentication Required**: x-user-id header
     """
+    require_scope(http_request, "builder:write")
+
     import uuid as _uuid
     project_id = request.project_id or str(_uuid.uuid4())
 
@@ -718,16 +722,19 @@ class ModifyProjectRequest(BaseModel):
 async def modify_project(
     project_id: str,
     request: ModifyProjectRequest,
+    http_request: Request,
     current_user: dict = Depends(get_current_user),
 ):
     """
     Modify an existing project using LLM.
-    
+
     **Authentication Required**: X-User-ID header
-    
+
     Loads existing project files, sends to LLM with modification request,
     and saves the updated files back to the project.
     """
+    require_scope(http_request, "builder:write")
+
     builder = await get_builder_agent()
     user_id = current_user["user_id"]
     

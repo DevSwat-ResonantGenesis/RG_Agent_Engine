@@ -29,6 +29,7 @@ from .executor import agent_executor
 from .safety import approval_manager
 from .publish_agent import publish_agent_to_blockchain
 from .config import settings
+from .scope_check import require_scope
 
 
 BLOCKCHAIN_SERVICE_URL = os.getenv("BLOCKCHAIN_SERVICE_URL", "http://blockchain_service:8000")
@@ -1670,6 +1671,7 @@ async def create_agent(
 ):
     """Create a new agent definition."""
     try:
+        require_scope(request, "agents:write")
         user_id = request.headers.get("x-user-id")
         if not user_id:
             raise HTTPException(status_code=401, detail="User ID required")
@@ -3668,6 +3670,8 @@ async def patch_agent(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid agent_id")
 
+    require_scope(request, "agents:write")
+
     result = await session.execute(
         select(AgentDefinition).where(AgentDefinition.id == agent_uuid)
     )
@@ -3784,6 +3788,8 @@ async def delete_agent(
     hidden from the user's active list but all data and on-chain
     references remain intact.
     """
+    require_scope(request, "agents:delete")
+
     try:
         agent_uuid = PyUUID(agent_id)
     except ValueError:
@@ -3795,6 +3801,16 @@ async def delete_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Ownership check - this endpoint had none at all before (any x-user-id
+    # could archive any other user's agent), unlike patch_agent's equivalent
+    # check above. Same allowance for owner/admin/superuser roles.
+    user_id = request.headers.get("x-user-id")
+    if user_id and agent.user_id and str(agent.user_id) != user_id:
+        user_role = (request.headers.get("x-user-role") or "").lower()
+        is_superuser = (request.headers.get("x-is-superuser") or "").lower() in ("true", "1")
+        if user_role not in ("owner", "platform_owner", "admin") and not is_superuser:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this agent")
 
     if agent.archived_at is not None:
         return {"status": "already_archived", "id": agent_id}
