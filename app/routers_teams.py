@@ -308,6 +308,70 @@ async def get_team(
     )
 
 
+async def _update_team_impl(
+    team_id: str,
+    payload: TeamCreateRequest,
+    request: Request,
+    session: AsyncSession,
+) -> TeamResponse:
+    user_id = _get_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    result = await session.execute(select(AgentTeam).where(AgentTeam.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if str(team.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this team")
+
+    team.name = payload.name
+    team.description = payload.description
+    team.member_agent_ids = [uuid.UUID(aid) for aid in payload.agent_ids] if payload.agent_ids else []
+    if payload.workflow_config is not None:
+        team.config = payload.workflow_config
+    team.updated_at = datetime.utcnow()
+
+    await session.commit()
+    await session.refresh(team)
+
+    return TeamResponse(
+        id=str(team.id),
+        org_id=str(team.org_id) if team.org_id else None,
+        name=team.name,
+        description=team.description,
+        workflow_config=team.config,
+        created_by=str(team.user_id),
+        status=team.status,
+        created_at=team.created_at.isoformat(),
+        updated_at=team.updated_at.isoformat() if team.updated_at else None,
+        member_count=len(team.member_agent_ids) if team.member_agent_ids else 0,
+        is_public=bool(team.is_public),
+    )
+
+
+@router.put("/{team_id}", response_model=TeamResponse)
+async def update_team_put(
+    team_id: str,
+    payload: TeamCreateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Update a team's name/description/members/workflow config."""
+    return await _update_team_impl(team_id, payload, request, session)
+
+
+@router.patch("/{team_id}", response_model=TeamResponse)
+async def update_team_patch(
+    team_id: str,
+    payload: TeamCreateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Update a team's name/description/members/workflow config (PATCH alias of PUT)."""
+    return await _update_team_impl(team_id, payload, request, session)
+
+
 @router.delete("/{team_id}")
 async def delete_team(
     team_id: str,

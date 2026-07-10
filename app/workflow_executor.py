@@ -60,16 +60,28 @@ async def execute_workflow_background(
             
             # Execute based on workflow type
             workflow_type = team.config.get("type", "sequential") if team.config else "sequential"
-            
+            team_prompt = (team.config or {}).get("team_prompt")
+
+            # A team_prompt is the user's own instructions for how members
+            # should collaborate (tone, role split, constraints) — fold it
+            # into the goal every member actually receives instead of
+            # silently ignoring it.
+            effective_input = dict(input_data) if isinstance(input_data, dict) else {"goal": str(input_data)}
+            if team_prompt:
+                original_goal = effective_input.get("goal", "")
+                effective_input["goal"] = (
+                    f"TEAM INSTRUCTIONS: {team_prompt}\n\nTASK: {original_goal}" if original_goal else team_prompt
+                )
+
             team_user_id = str(team.user_id) if team.user_id else None
 
             try:
                 if workflow_type == "sequential":
-                    result = await execute_sequential(session, agent_ids, input_data, team_user_id)
+                    result = await execute_sequential(session, agent_ids, effective_input, team_user_id)
                 elif workflow_type == "parallel":
-                    result = await execute_parallel(session, agent_ids, input_data, team_user_id)
+                    result = await execute_parallel(session, agent_ids, effective_input, team_user_id)
                 elif workflow_type == "branching":
-                    result = await execute_branching(session, agent_ids, input_data, team.config, team_user_id)
+                    result = await execute_branching(session, agent_ids, effective_input, team.config, team_user_id)
                 else:
                     raise ValueError(f"Unknown workflow type: {workflow_type}")
                 
