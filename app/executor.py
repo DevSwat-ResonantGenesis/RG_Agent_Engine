@@ -3399,6 +3399,22 @@ Respond in JSON:
         preferred = _alias.get(agent_provider.lower(), agent_provider.lower()) if agent_provider else None
         agent_model = agent.model or None
 
+        # A "provider/model" string only means something to tokenrouter (its
+        # catalog is genuinely keyed that way, e.g. "anthropic/claude-opus-4.7").
+        # For every other explicit provider, a "provider/" prefix on the model
+        # name is invalid and gets sent to that provider's real API verbatim —
+        # e.g. agent.model="anthropic/claude-haiku-4-5-20251001" with
+        # provider="anthropic" sent literally "anthropic/claude-haiku-..." to
+        # Anthropic's API, which rejected it, and the resulting fallback then
+        # cascaded to other (broken) providers — looking like "the agent tried
+        # the wrong key" when it was really the right provider with a mangled
+        # model name. Strip a matching prefix here.
+        if preferred and preferred != "tokenrouter" and agent_model and "/" in agent_model:
+            _prefix, _rest = agent_model.split("/", 1)
+            _prefix_norm = _alias.get(_prefix.lower(), _prefix.lower())
+            if _prefix_norm == preferred:
+                agent_model = _rest
+
         # If preferred provider is not tokenrouter, check if it has an API key.
         # If not, fall back to tokenrouter with a capable model instead of
         # sending a provider-specific model name (e.g. llama-3.3-70b-versatile)
