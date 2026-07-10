@@ -9,7 +9,8 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
-from uuid import UUID as PyUUID
+from uuid import UUID as PyUUID, uuid4
+from datetime import datetime, timezone
 import httpx
 import os
 import logging
@@ -178,27 +179,48 @@ async def execute_task(
                 "federated": True,
             }
 
-    # Cloud agent: route through real executor session
+    # Cloud agent: route through the real executor loop.
+    # NOTE: this previously called a nonexistent `real_executor.run_session(...)`
+    # method (AttributeError on every single call, silently caught below and
+    # reported as a generic failure) — the executor's real entry point is
+    # `run_loop`, which needs an actual persisted AgentSession row, not just
+    # (agent, task, context). This is why this endpoint (used by the
+    # marketplace's "Execute Agent" panel) never worked at all.
     from .executor import agent_executor as real_executor
+    import time as _time
+    _t0 = _time.time()
+    agent_session = AgentSession(
+        id=uuid4(),
+        agent_id=agent.id,
+        user_id=PyUUID(user_id) if user_id and user_id != "anonymous" else None,
+        status="initializing",
+        current_goal=request.task,
+        context=merged_context,
+        started_at=datetime.now(timezone.utc),
+    )
+    session.add(agent_session)
+    await session.commit()
+    await session.refresh(agent_session)
+
     try:
-        session_result = await real_executor.run_session(
-            agent, request.task, merged_context,
+        result = await real_executor.run_loop(
+            session=agent_session, agent=agent, db_session=session,
         )
         return {
-            "task_id": str(session_result) if session_result else agent_id,
-            "success": True,
-            "output": str(session_result)[:1000] if session_result else "",
+            "task_id": str(agent_session.id),
+            "success": result.get("status") == "completed",
+            "output": agent_session.final_output or result.get("output"),
             "tools_used": [],
-            "duration_ms": 0,
-            "error": None,
+            "duration_ms": int((_time.time() - _t0) * 1000),
+            "error": result.get("error"),
         }
     except Exception as e:
         return {
-            "task_id": agent_id,
+            "task_id": str(agent_session.id),
             "success": False,
             "output": None,
             "tools_used": [],
-            "duration_ms": 0,
+            "duration_ms": int((_time.time() - _t0) * 1000),
             "error": str(e),
         }
 
