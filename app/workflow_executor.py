@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import async_session
 from .models import AgentTeam, AgentTeamWorkflow, AgentDefinition
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +86,21 @@ async def execute_workflow_background(
                 else:
                     raise ValueError(f"Unknown workflow type: {workflow_type}")
                 
-                # Update workflow with results
-                workflow.status = "completed"
+                # Update workflow with results. A member landing in
+                # waiting_approval or failed is NOT the same as the team
+                # finishing successfully — reflect that on the workflow
+                # itself so it doesn't look "completed" while a human
+                # approval is actually still outstanding.
+                if result.get("waiting_approval"):
+                    workflow.status = "waiting_approval"
+                elif result.get("failed"):
+                    workflow.status = "failed"
+                    workflow.error_message = result.get("error") or "A team member failed"
+                else:
+                    workflow.status = "completed"
+                    workflow.completed_at = datetime.utcnow()
                 workflow.final_output = result
-                workflow.completed_at = datetime.utcnow()
-                
+
             except Exception as e:
                 logger.error(f"Workflow {workflow_id} failed: {e}", exc_info=True)
                 workflow.status = "failed"
@@ -130,10 +141,33 @@ async def execute_sequential(
             "input": current_input,
             "output": output,
         })
-        
+
+        # A member that hit waiting_approval or failed has no real output to
+        # hand off — chaining it forward anyway (as this used to) meant the
+        # NEXT agent silently ran on garbage (the previous step's raw status
+        # dict, JSON-stringified) while the actual blocked step was never
+        # surfaced anywhere a human could resolve it. Stop the chain instead.
+        if output.get("status") == "waiting_approval":
+            return {
+                "type": "sequential",
+                "steps": results,
+                "final_output": None,
+                "waiting_approval": True,
+                "pending_session_id": output.get("session_id"),
+                "pending_agent_name": agent.name,
+            }
+        if output.get("status") != "completed":
+            return {
+                "type": "sequential",
+                "steps": results,
+                "final_output": None,
+                "failed": True,
+                "error": output.get("error") or f"{agent.name} did not complete (status={output.get('status')})",
+            }
+
         # Output becomes input for next agent
         current_input = output
-    
+
     return {
         "type": "sequential",
         "steps": results,
@@ -165,21 +199,31 @@ async def execute_parallel(
     )
 
     results = []
+    pending_session_id = None
     for agent, output in zip(agents, outputs):
         if isinstance(output, Exception):
             logger.error(f"Agent {agent.id} failed: {output}")
             results.append({"agent_id": str(agent.id), "agent_name": agent.name, "error": str(output)})
         else:
             results.append({"agent_id": str(agent.id), "agent_name": agent.name, "output": output})
+            if output.get("status") == "waiting_approval" and not pending_session_id:
+                pending_session_id = output.get("session_id")
 
-    return {
+    result = {
         "type": "parallel",
         "results": results,
         "combined_output": "\n\n".join(
             str(r["output"].get("output", "") if isinstance(r.get("output"), dict) else r.get("output", ""))
-            for r in results if "output" in r
+            for r in results if "output" in r and r["output"].get("status") == "completed"
         ),
     }
+    # At least one member is blocked on human approval — surface it at the
+    # workflow level too (the OTHER members' real completed outputs still
+    # ride along in `results`, nothing is discarded).
+    if pending_session_id:
+        result["waiting_approval"] = True
+        result["pending_session_id"] = pending_session_id
+    return result
 
 
 async def execute_branching(
@@ -216,7 +260,13 @@ async def execute_agent_task(
             user_id=user_id,
             db_session=db,
         )
-        result = await agent_executor.run_loop(child_session, agent, db)
+        try:
+            result = await asyncio.wait_for(
+                agent_executor.run_loop(child_session, agent, db),
+                timeout=settings.SAFETY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            result = {"status": "failed", "error": f"Timed out after {settings.SAFETY_TIMEOUT_SECONDS}s"}
 
     return {
         "agent": agent.name,

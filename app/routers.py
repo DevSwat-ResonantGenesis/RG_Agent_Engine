@@ -460,8 +460,12 @@ class StepResponse(BaseModel):
     step_type: str
     reasoning: Optional[str]
     tool_name: Optional[str]
+    tool_input: Optional[Dict[str, Any]] = None
     output_data: Optional[Dict[str, Any]]
     safety_check_passed: bool
+    safety_violations: Optional[List[str]] = None
+    required_approval: bool = False
+    approval_status: Optional[str] = None
     duration_ms: Optional[int]
 
 
@@ -4409,8 +4413,12 @@ async def get_session_steps(
             step_type=s.step_type,
             reasoning=s.reasoning,
             tool_name=s.tool_name,
+            tool_input=s.tool_input,
             output_data=s.output_data,
             safety_check_passed=s.safety_check_passed,
+            safety_violations=s.safety_violations,
+            required_approval=bool(s.required_approval),
+            approval_status=s.approval_status,
             duration_ms=s.duration_ms,
         )
         for s in steps
