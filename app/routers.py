@@ -3479,6 +3479,92 @@ async def list_agent_versions(
     }
 
 
+@router.post("/{agent_id}/versions/{version_number}/restore")
+async def restore_agent_version(
+    agent_id: str,
+    version_number: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Roll an agent's config back to a previously snapshotted version.
+
+    Restoring is itself recorded as a new version (not a destructive
+    overwrite) so you can always go back further, or undo a bad restore.
+    """
+    try:
+        agent_uuid = PyUUID(agent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid agent_id")
+
+    user_id = request.headers.get("x-user-id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID required")
+    try:
+        user_uuid = PyUUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid user_id")
+
+    result = await session.execute(
+        select(AgentDefinition).where(
+            AgentDefinition.id == agent_uuid,
+            AgentDefinition.user_id == user_uuid,
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    version_result = await session.execute(
+        select(AgentVersion).where(
+            AgentVersion.agent_id == agent_uuid,
+            AgentVersion.version_number == version_number,
+        )
+    )
+    version_row = version_result.scalar_one_or_none()
+    if not version_row or not version_row.config_snapshot:
+        raise HTTPException(status_code=404, detail=f"Version {version_number} not found for this agent")
+
+    snapshot = version_row.config_snapshot
+    previous_version_hash = agent.agent_version_hash
+    restorable_fields = (
+        "name", "description", "system_prompt", "model", "temperature",
+        "max_tokens", "tools", "tool_config", "allowed_actions", "blocked_actions", "safety_config",
+    )
+    for field in restorable_fields:
+        if field in snapshot:
+            setattr(agent, field, snapshot[field])
+
+    agent.version = (agent.version or 1) + 1
+    agent.agent_version_hash = compute_manifest_hash(
+        name=agent.name,
+        description=agent.description,
+        system_prompt=agent.system_prompt,
+        model=agent.model,
+        temperature=agent.temperature,
+        max_tokens=agent.max_tokens,
+        tools=agent.tools,
+        allowed_actions=agent.allowed_actions,
+        blocked_actions=agent.blocked_actions,
+    )
+    new_version_row = _make_agent_version_row(agent=agent, previous_version_hash=previous_version_hash)
+    if new_version_row:
+        new_version_row.changelog = f"Restored from version {version_number}"
+        session.add(new_version_row)
+
+    await session.commit()
+    await session.refresh(agent)
+
+    return {
+        "id": str(agent.id),
+        "restored_from_version": version_number,
+        "new_version": agent.version,
+        "name": agent.name,
+        "system_prompt": agent.system_prompt,
+        "model": agent.model,
+        "tools": agent.tools,
+    }
+
+
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(
     agent_id: str,
@@ -3614,9 +3700,30 @@ async def patch_agent(
     if not updated:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    # Bump version on meaningful changes
+    # Bump version on meaningful changes AND actually snapshot it — this
+    # endpoint (used by the agent-builder/architect's continue_build/add_tools
+    # flow, PATCH /{agent_id}) used to bump the version counter but never
+    # wrote an AgentVersion row, unlike the settings PUT endpoint. That's why
+    # "version 2", "version 3" etc. never showed up anywhere or could be
+    # restored — the counter moved but no history was ever saved.
+    previous_version_hash = agent.agent_version_hash
     if any(f in updated for f in ("name", "description", "system_prompt", "model", "tools", "mode")):
         agent.version = (agent.version or 1) + 1
+        agent.agent_version_hash = compute_manifest_hash(
+            name=agent.name,
+            description=agent.description,
+            system_prompt=agent.system_prompt,
+            model=agent.model,
+            temperature=agent.temperature,
+            max_tokens=agent.max_tokens,
+            tools=agent.tools,
+            allowed_actions=agent.allowed_actions,
+            blocked_actions=agent.blocked_actions,
+        )
+        version_row = _make_agent_version_row(agent=agent, previous_version_hash=previous_version_hash)
+        if version_row:
+            version_row.changelog = f"Updated: {', '.join(updated)}"
+            session.add(version_row)
 
     await session.commit()
     await session.refresh(agent)
