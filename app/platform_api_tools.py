@@ -725,6 +725,11 @@ async def platform_api_call(args: dict, ctx: dict) -> dict:
         "x-org-id": ctx.get("org_id", user_id),
         "content-type": "application/json",
     }
+    if service_key == "code_execution":
+        # code_execution_service requires this on every route (see its
+        # app/security.py) — it has /var/run/docker.sock mounted for its own
+        # sandboxing, so it fails closed without a valid internal key.
+        headers["x-internal-service-key"] = os.getenv("CODE_EXECUTION_INTERNAL_SERVICE_KEY", "")
 
     # Safety: block dangerous paths
     dangerous_prefixes = ("/admin", "/rara", "/daemon", "/control")
