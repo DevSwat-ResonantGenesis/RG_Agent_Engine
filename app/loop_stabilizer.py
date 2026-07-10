@@ -42,14 +42,19 @@ class StabilityAction(str, Enum):
 @dataclass
 class StabilityConfig:
     """Configuration for loop stabilization."""
-    max_iterations: int = 50
+    max_iterations: int = 250
     max_consecutive_errors: int = 3
     max_plan_revisions: int = 5
     stagnation_window: int = 5  # Steps to check for stagnation
     min_progress_per_window: float = 0.1  # Minimum progress expected
     confidence_threshold: float = 0.6
     oscillation_detection_window: int = 6
-    max_similar_steps: int = 3
+    # Same tool+input hashing identically N times in the last 10 steps aborts
+    # the run. 3 was too aggressive for legitimate no-arg/idempotent tools
+    # (e.g. finalize_audio_podcast takes zero params, so calling it more than
+    # 3 times in a row — a perfectly normal check-in pattern — hashed
+    # identically every time and got misdetected as an infinite loop.
+    max_similar_steps: int = 8
     cooldown_seconds: float = 0.5
     escalation_delay_seconds: float = 30.0
 
@@ -412,5 +417,11 @@ class LoopStabilizer:
         return self.config.cooldown_seconds
 
 
-# Global stabilizer instance
-loop_stabilizer = LoopStabilizer()
+# Global stabilizer instance — max_iterations tracks the same global cap
+# used everywhere else (settings.MAX_LOOP_ITERATIONS) so this doesn't silently
+# drift back out of sync with it again.
+try:
+    from .config import settings as _settings
+    loop_stabilizer = LoopStabilizer(StabilityConfig(max_iterations=_settings.MAX_LOOP_ITERATIONS))
+except Exception:
+    loop_stabilizer = LoopStabilizer()

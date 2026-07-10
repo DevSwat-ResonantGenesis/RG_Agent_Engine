@@ -28,6 +28,7 @@ from .models import (
 from .executor import agent_executor
 from .safety import approval_manager
 from .publish_agent import publish_agent_to_blockchain
+from .config import settings
 
 
 BLOCKCHAIN_SERVICE_URL = os.getenv("BLOCKCHAIN_SERVICE_URL", "http://blockchain_service:8000")
@@ -3775,10 +3776,14 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
         try:
             await asyncio.wait_for(
                 _run_agent_session_background_inner(session_id=str(session_uuid), agent_id=str(agent_uuid)),
-                timeout=900,  # 15 minute max per session (increased from 5 min for complex goals)
+                # This is a HARD external kill switch independent of the
+                # per-step safety.py check — was hardcoded to 900s (15 min)
+                # and silently overrode settings.SAFETY_TIMEOUT_SECONDS no
+                # matter how high that was raised. Now tracks the same setting.
+                timeout=settings.SAFETY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            logger.error("Agent session %s timed out after 15 minutes", session_id)
+            logger.error("Agent session %s timed out after %ss", session_id, settings.SAFETY_TIMEOUT_SECONDS)
             try:
                 async with async_session() as db_session:
                     result = await db_session.execute(
@@ -3787,7 +3792,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
                     agent_session = result.scalar_one_or_none()
                     if agent_session and agent_session.status in ("initializing", "queued", "running"):
                         agent_session.status = "failed"
-                        agent_session.error_message = "Session timed out (15 minute limit)"
+                        agent_session.error_message = f"Session timed out ({settings.SAFETY_TIMEOUT_SECONDS}s limit)"
                         await db_session.commit()
             except Exception:
                 pass
