@@ -428,6 +428,11 @@ class AgentResponse(BaseModel):
     updated_at: Optional[str] = None
     running_sessions: int = 0
     active_schedules: int = 0
+    safety_config: Optional[Dict[str, Any]] = None
+    tool_config: Optional[Dict[str, Any]] = None
+    autonomous: bool = False
+    allowed_actions: Optional[List[str]] = None
+    blocked_actions: Optional[List[str]] = None
 
 
 class SessionCreate(BaseModel):
@@ -2944,22 +2949,24 @@ async def update_agent_mode(
     old_mode = agent.mode
     agent.mode = new_mode
 
-    # Update safety_config limits based on mode
+    # Update safety_config limits based on mode. Keys here must match what
+    # safety.py actually reads (max_loops, max_tokens_per_run) — a previous
+    # version wrote "max_steps_per_run" which nothing ever consulted.
     safety = agent.safety_config or {}
     if new_mode == "unbounded":
         safety["mode"] = "unbounded"
-        safety["max_steps_per_run"] = 200
-        safety["max_tokens_per_run"] = 500000
+        safety["max_loops"] = 1000
+        safety["max_tokens_per_run"] = 1000000
         safety["rate_limit_per_minute"] = 120
     elif new_mode == "governed":
         safety["mode"] = "governed"
-        safety["max_steps_per_run"] = 25
-        safety["max_tokens_per_run"] = 50000
+        safety["max_loops"] = 100
+        safety["max_tokens_per_run"] = 300000
         safety["rate_limit_per_minute"] = 30
     else:  # supervised
         safety["mode"] = "supervised"
-        safety["max_steps_per_run"] = 50
-        safety["max_tokens_per_run"] = 100000
+        safety["max_loops"] = 200
+        safety["max_tokens_per_run"] = 600000
         safety["rate_limit_per_minute"] = 60
     agent.safety_config = safety
 
@@ -3636,6 +3643,11 @@ async def get_agent(
         dsid=(agent.safety_config or {}).get("dsid"),
         agent_source=getattr(agent, 'agent_source', None) or 'cloud',
         openclaw_config=getattr(agent, 'openclaw_config', None),
+        safety_config=agent.safety_config or {},
+        tool_config=agent.tool_config or {},
+        autonomous=bool(getattr(agent, 'autonomous', False)),
+        allowed_actions=agent.allowed_actions,
+        blocked_actions=agent.blocked_actions,
     )
 
 
@@ -3691,7 +3703,7 @@ async def patch_agent(
     # Handle max_loops convenience field → store in safety_config
     if "max_loops" in body:
         max_loops_val = body["max_loops"]
-        if isinstance(max_loops_val, int) and 1 <= max_loops_val <= 100:
+        if isinstance(max_loops_val, int) and 1 <= max_loops_val <= 2000:
             sc = dict(agent.safety_config or {})
             sc["max_loops"] = max_loops_val
             agent.safety_config = sc
@@ -3752,6 +3764,9 @@ async def patch_agent(
         "updated_fields": updated,
         "agent_public_hash": agent.agent_public_hash,
         "dsid": (agent.safety_config or {}).get("dsid"),
+        "safety_config": agent.safety_config or {},
+        "tool_config": agent.tool_config or {},
+        "autonomous": agent.autonomous,
     }
 
 

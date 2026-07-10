@@ -255,7 +255,7 @@ class SafetyEnvelope:
         _max_loops = settings.MAX_LOOP_ITERATIONS
         _max_tokens = settings.MAX_TOKENS_PER_RUN
         _sc_loops = _sc.get("max_loops")
-        if _sc_loops and isinstance(_sc_loops, int) and 1 <= _sc_loops <= 100:
+        if _sc_loops and isinstance(_sc_loops, int) and 1 <= _sc_loops <= 2000:
             _max_loops = _sc_loops
         _sc_tokens = _sc.get("max_tokens_per_run")
         if _sc_tokens and isinstance(_sc_tokens, int) and _sc_tokens > 0:
