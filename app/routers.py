@@ -3746,7 +3746,7 @@ async def unarchive_agent(
 
 # ============== Session Endpoints ==============
 
-async def _run_agent_session_background(*, session_id: str, agent_id: str) -> None:
+async def _run_agent_session_background(*, session_id: str, agent_id: str, resume_history: Optional[list] = None) -> None:
     try:
         session_uuid = PyUUID(session_id)
         agent_uuid = PyUUID(agent_id)
@@ -3775,7 +3775,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
     try:
         try:
             await asyncio.wait_for(
-                _run_agent_session_background_inner(session_id=str(session_uuid), agent_id=str(agent_uuid)),
+                _run_agent_session_background_inner(session_id=str(session_uuid), agent_id=str(agent_uuid), resume_history=resume_history),
                 # This is a HARD external kill switch independent of the
                 # per-step safety.py check — was hardcoded to 900s (15 min)
                 # and silently overrode settings.SAFETY_TIMEOUT_SECONDS no
@@ -3815,7 +3815,7 @@ async def _run_agent_session_background(*, session_id: str, agent_id: str) -> No
         _agent_run_semaphore.release()
 
 
-async def _run_agent_session_background_inner(*, session_id: str, agent_id: str) -> None:
+async def _run_agent_session_background_inner(*, session_id: str, agent_id: str, resume_history: Optional[list] = None) -> None:
     session_uuid = PyUUID(session_id)
     agent_uuid = PyUUID(agent_id)
 
@@ -3834,7 +3834,7 @@ async def _run_agent_session_background_inner(*, session_id: str, agent_id: str)
             return
 
         try:
-            await agent_executor.run_loop(agent_session, agent, db_session)
+            await agent_executor.run_loop(agent_session, agent, db_session, resume_history=resume_history)
         except Exception as e:
             try:
                 await db_session.rollback()
@@ -4026,6 +4026,81 @@ async def start_session(
         current_goal=agent_session.current_goal,
         loop_count=agent_session.loop_count,
         total_tokens_used=agent_session.total_tokens_used,
+    )
+
+
+@router.post("/sessions/{session_id}/continue", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+async def continue_session(
+    session_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+):
+    """Continue a finished session (hit its loop/token/time limit, or just
+    stopped) as a NEW session that inherits the old one's full step history —
+    instead of the user having to start over from scratch and re-explain
+    everything the agent already did.
+    """
+    try:
+        old_uuid = PyUUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
+    result = await session.execute(select(AgentSession).where(AgentSession.id == old_uuid))
+    old_session = result.scalar_one_or_none()
+    if not old_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    user_id = request.headers.get("x-user-id")
+    if user_id and old_session.user_id and str(old_session.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to continue this session")
+
+    agent_result = await session.execute(select(AgentDefinition).where(AgentDefinition.id == old_session.agent_id))
+    agent = agent_result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Reconstruct prior-step context from persisted AgentStep rows — same
+    # shape _get_next_action's history entries use (see _resume_session_after_approval).
+    steps_result = await session.execute(
+        select(AgentStep).where(AgentStep.session_id == old_session.id).order_by(AgentStep.step_number)
+    )
+    resume_history = [
+        {
+            "action": s.step_type,
+            "tool_name": s.tool_name,
+            "tool_input": s.tool_input,
+            "result": s.tool_output,
+            "reasoning": s.reasoning,
+            "response": (s.output_data or {}).get("response") if isinstance(s.output_data, dict) else None,
+        }
+        for s in steps_result.scalars().all()
+    ]
+
+    new_session = await agent_executor.start_session(
+        agent=agent,
+        goal=old_session.current_goal,
+        initial_context={**(old_session.context or {}), "continued_from_session_id": str(old_session.id)},
+        user_id=str(old_session.user_id) if old_session.user_id else user_id,
+        db_session=session,
+    )
+    new_session.status = "queued"
+    await session.commit()
+
+    background_tasks.add_task(
+        _run_agent_session_background,
+        session_id=str(new_session.id),
+        agent_id=str(agent.id),
+        resume_history=resume_history,
+    )
+
+    return SessionResponse(
+        id=str(new_session.id),
+        agent_id=str(new_session.agent_id),
+        status=new_session.status,
+        current_goal=new_session.current_goal,
+        loop_count=new_session.loop_count,
+        total_tokens_used=new_session.total_tokens_used,
     )
 
 

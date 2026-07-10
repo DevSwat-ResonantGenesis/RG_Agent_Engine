@@ -2468,8 +2468,15 @@ Respond in JSON:
         session: AgentSession,
         agent: AgentDefinition,
         db_session: AsyncSession,
+        resume_history: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Run the autonomous agent loop."""
+        """Run the autonomous agent loop.
+
+        resume_history: when this session is continuing a prior, finished
+        session (see the /sessions/{id}/continue endpoint), seeds the LLM's
+        context with that session's reconstructed steps instead of starting
+        with total amnesia about everything done before.
+        """
         if self._sandbox:
             self._sandbox.reset_session()
         import time as _time
@@ -2478,7 +2485,7 @@ Respond in JSON:
         _result: Dict[str, Any] = {"status": "failed", "error": "unknown"}
 
         try:
-            _result = await self._run_loop_inner(session, agent, db_session, _step_history)
+            _result = await self._run_loop_inner(session, agent, db_session, _step_history, resume_history=resume_history)
             return _result
         except Exception as e:
             _result = {"status": "failed", "error": str(e)}
