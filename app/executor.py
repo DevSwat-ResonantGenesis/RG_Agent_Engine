@@ -2763,11 +2763,21 @@ Respond in JSON:
                 
                 # Handle stability actions
                 if stability.action == StabilityAction.ABORT:
-                    session.status = "failed"
-                    session.error_message = f"Loop aborted: {stability.reason}"
+                    _recovery = self._synthesize_recovery_output(_step_history)
+                    session.status = "completed" if _recovery["has_deliverable"] else "failed"
+                    session.final_output = _recovery["output"]
+                    session.error_message = (
+                        f"Completed with a stability warning: {stability.reason}"
+                        if _recovery["has_deliverable"] else f"Loop aborted: {stability.reason}"
+                    )
                     session.completed_at = datetime.utcnow()
                     await db_session.commit()
-                    return {"status": "failed", "error": stability.reason}
+                    result = {
+                        "status": session.status, "output": _recovery["output"],
+                        "error": None if _recovery["has_deliverable"] else stability.reason,
+                    }
+                    self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
+                    return result
                 
                 if stability.action == StabilityAction.ROLLBACK:
                     checkpoint = _stabilizer.get_latest_checkpoint()
@@ -2805,11 +2815,18 @@ Respond in JSON:
                         if escalation.status.value == "completed" and escalation.result:
                             # Apply supervisor guidance
                             if escalation.result.get("action") == "abort":
-                                session.status = "failed"
+                                _recovery = self._synthesize_recovery_output(_step_history)
+                                session.status = "completed" if _recovery["has_deliverable"] else "failed"
+                                session.final_output = _recovery["output"]
                                 session.error_message = f"Supervisor aborted: {escalation.result.get('reason')}"
                                 session.completed_at = datetime.utcnow()
                                 await db_session.commit()
-                                return {"status": "failed", "error": session.error_message}
+                                result = {
+                                    "status": session.status, "output": _recovery["output"],
+                                    "error": None if _recovery["has_deliverable"] else session.error_message,
+                                }
+                                self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
+                                return result
                 
                 # Handle verification failures — add as guidance so LLM adjusts
                 if verification.result == VerificationResult.REJECTED:
@@ -2819,11 +2836,21 @@ Respond in JSON:
                     step_result["verification_feedback"] = f"HALLUCINATION: {verification.reasoning}. Use real data only."
                     step_result["error"] = f"Hallucination detected: {verification.reasoning}"
                 elif verification.result == VerificationResult.LOOP_DETECTED:
-                    session.status = "failed"
-                    session.error_message = "Infinite loop detected by verifier"
+                    _recovery = self._synthesize_recovery_output(_step_history)
+                    session.status = "completed" if _recovery["has_deliverable"] else "failed"
+                    session.final_output = _recovery["output"]
+                    session.error_message = (
+                        "Completed (loop detected by verifier after finishing real work)"
+                        if _recovery["has_deliverable"] else "Infinite loop detected by verifier"
+                    )
                     session.completed_at = datetime.utcnow()
                     await db_session.commit()
-                    return {"status": "failed", "error": "Infinite loop detected"}
+                    result = {
+                        "status": session.status, "output": _recovery["output"],
+                        "error": None if _recovery["has_deliverable"] else "Infinite loop detected",
+                    }
+                    self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
+                    return result
                 
                 # Create checkpoint if recommended
                 if _stabilizer.should_create_checkpoint():
@@ -2870,11 +2897,16 @@ Respond in JSON:
                         plan.revision_count += 1
                         await db_session.commit()
                     else:
-                        session.status = "failed"
+                        _recovery = self._synthesize_recovery_output(_step_history)
+                        session.status = "completed" if _recovery["has_deliverable"] else "failed"
+                        session.final_output = _recovery["output"]
                         session.error_message = error
                         session.completed_at = datetime.utcnow()
                         await db_session.commit()
-                        result = {"status": "failed", "error": error}
+                        result = {
+                            "status": session.status, "output": _recovery["output"],
+                            "error": None if _recovery["has_deliverable"] else error,
+                        }
                         self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
                         return result
 
@@ -2882,37 +2914,79 @@ Respond in JSON:
                 await asyncio.sleep(1.5)
 
             # Loop limit reached — synthesize final output from tool results
-            _final_parts = []
-            for sh in _step_history:
-                if sh.get("action") == "tool_call" and sh.get("result"):
-                    _r = sh["result"]
-                    if isinstance(_r, dict):
-                        _r = json.dumps(_r, indent=2)[:500]
-                    elif isinstance(_r, str):
-                        _r = _r[:500]
-                    else:
-                        _r = str(_r)[:500]
-                    _final_parts.append(f"[{sh.get('tool_name','?')}]: {_r}")
-                elif sh.get("action") == "respond" and sh.get("response"):
-                    _final_parts.append(sh["response"])
-            _synthesized = "\n".join(_final_parts[-5:]) if _final_parts else "Agent reached loop limit without producing a final response."
+            _recovery = self._synthesize_recovery_output(_step_history)
             session.status = "completed"
-            session.final_output = _synthesized
+            session.final_output = _recovery["output"]
             session.error_message = "Completed (loop limit reached)"
             session.completed_at = datetime.utcnow()
             await db_session.commit()
-            result = {"status": "completed", "output": _synthesized}
+            result = {"status": "completed", "output": _recovery["output"]}
             self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
             return result
 
         except Exception as e:
-            session.status = "failed"
+            _recovery = self._synthesize_recovery_output(_step_history)
+            session.status = "completed" if _recovery["has_deliverable"] else "failed"
+            session.final_output = _recovery["output"] if _recovery["has_deliverable"] else None
             session.error_message = str(e)
             session.completed_at = datetime.utcnow()
             await db_session.commit()
-            result = {"status": "failed", "error": str(e)}
+            result = {
+                "status": session.status,
+                "output": _recovery["output"] if _recovery["has_deliverable"] else None,
+                "error": None if _recovery["has_deliverable"] else str(e),
+            }
             self._record_session_learning(session, agent, result, _step_history, _loop_start_time)
             return result
+
+    def _synthesize_recovery_output(self, _step_history: list) -> Dict[str, Any]:
+        """Best-effort final output built from whatever tool work actually
+        succeeded, for use whenever a session gets cut off (loop-stabilizer
+        abort, safety timeout, infinite-loop detection, unhandled exception,
+        etc.) instead of the natural end-of-loop path.
+
+        Previously these abort paths just set error_message and gave up —
+        even if the agent had ALREADY successfully generated audio and
+        called finalize_audio_podcast (a real, usable deliverable with a
+        download_url), that work was silently discarded because only the
+        natural "loop limit reached" exit synthesized anything. Also, that
+        synthesis only ever looked at the last 5 entries — if the real
+        deliverable happened earlier in a long session, it got dropped too.
+
+        Returns {"output": str, "has_deliverable": bool} — has_deliverable
+        is True when a real download_url (from finalize_audio_podcast) or
+        other confirmed tool success was found, signaling the session
+        should be marked "completed" even though the loop didn't finish
+        cleanly on its own.
+        """
+        deliverable_parts = []
+        recent_parts = []
+        has_deliverable = False
+
+        for sh in _step_history:
+            if sh.get("action") != "tool_call" or not sh.get("result"):
+                continue
+            result = sh["result"]
+            tool_name = sh.get("tool_name", "?")
+            result_str = json.dumps(result, indent=2)[:800] if isinstance(result, dict) else str(result)[:800]
+            entry = f"[{tool_name}]: {result_str}"
+
+            is_success = isinstance(result, dict) and result.get("success")
+            if tool_name == "finalize_audio_podcast" and is_success:
+                has_deliverable = True
+                deliverable_parts.append(entry)
+            elif tool_name == "generate_audio" and is_success:
+                deliverable_parts.append(entry)
+            else:
+                recent_parts.append(entry)
+
+        for sh in _step_history:
+            if sh.get("action") == "respond" and sh.get("response"):
+                recent_parts.append(sh["response"])
+
+        parts = deliverable_parts + recent_parts[-5:]
+        output = "\n".join(parts) if parts else "Session was interrupted before producing a final response."
+        return {"output": output, "has_deliverable": has_deliverable}
 
     async def _execute_step(
         self,

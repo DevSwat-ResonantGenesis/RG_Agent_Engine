@@ -4029,17 +4029,48 @@ async def start_session(
     )
 
 
+class ContinueSessionRequest(BaseModel):
+    message: Optional[str] = None  # a genuine follow-up question/request; omit to just continue unfinished work
+
+
+def _summarize_completed_work(resume_history: list) -> str:
+    """Build a short summary of what a session's steps already accomplished,
+    prioritizing real deliverables (finalize_audio_podcast/generate_audio
+    successes) so a continuation prompt can tell the model not to redo them.
+    """
+    deliverables, other = [], []
+    for h in resume_history:
+        tool_name = h.get("tool_name")
+        result = h.get("result")
+        if h.get("action") != "tool_call" or not tool_name or not result:
+            continue
+        is_success = isinstance(result, dict) and result.get("success")
+        entry = f"- {tool_name}({json.dumps(h.get('tool_input') or {})[:150]}) -> {json.dumps(result)[:400] if isinstance(result, dict) else str(result)[:400]}"
+        if tool_name in ("finalize_audio_podcast", "generate_audio") and is_success:
+            deliverables.append(entry)
+        else:
+            other.append(entry)
+    parts = deliverables + other[-5:]
+    return "\n".join(parts) if parts else "(no tool calls completed yet)"
+
+
 @router.post("/sessions/{session_id}/continue", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def continue_session(
     session_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
+    payload: ContinueSessionRequest = ContinueSessionRequest(),
     session: AsyncSession = Depends(get_session),
 ):
-    """Continue a finished session (hit its loop/token/time limit, or just
-    stopped) as a NEW session that inherits the old one's full step history —
-    instead of the user having to start over from scratch and re-explain
-    everything the agent already did.
+    """Continue a finished session (hit its loop/token/time limit, failed, or
+    just stopped) as a NEW session that inherits the old one's full step
+    history and is explicitly told what was already done — instead of the
+    user having to start over from scratch, re-explain everything, and watch
+    the agent redo work it already finished.
+
+    Pass `message` for a genuine follow-up question/request ("make segment 2
+    shorter", "what scripture did you use?") — the new goal explicitly frames
+    it as building on the prior work, not a brand-new unrelated task.
     """
     try:
         old_uuid = PyUUID(session_id)
@@ -4077,9 +4108,30 @@ async def continue_session(
         for s in steps_result.scalars().all()
     ]
 
+    completed_summary = _summarize_completed_work(resume_history)
+    old_goal = old_session.current_goal or ""
+    if payload.message and payload.message.strip():
+        new_goal = (
+            f"This is a FOLLOW-UP on a previous session, not a new unrelated task. "
+            f"Original goal: {old_goal}\n\n"
+            f"What you ALREADY accomplished last time (do NOT redo this, do not call these tools again unless the "
+            f"user's message below specifically asks you to redo or change one of them):\n{completed_summary}\n\n"
+            f"The user now says: {payload.message.strip()}\n\n"
+            f"Respond to that directly, reusing what you already produced above wherever possible."
+        )
+    else:
+        new_goal = (
+            f"CONTINUE this goal from a previous attempt that stopped before finishing — do not start over. "
+            f"Original goal: {old_goal}\n\n"
+            f"What you ALREADY accomplished (do NOT redo any of this):\n{completed_summary}\n\n"
+            f"If everything needed to satisfy the goal was already completed above (e.g. finalize_audio_podcast "
+            f"already returned a download_url), do not call any more tools — just respond with the final "
+            f"structured output using that existing result. Otherwise, complete only what's still missing."
+        )
+
     new_session = await agent_executor.start_session(
         agent=agent,
-        goal=old_session.current_goal,
+        goal=new_goal,
         initial_context={**(old_session.context or {}), "continued_from_session_id": str(old_session.id)},
         user_id=str(old_session.user_id) if old_session.user_id else user_id,
         db_session=session,
@@ -4098,7 +4150,7 @@ async def continue_session(
         id=str(new_session.id),
         agent_id=str(new_session.agent_id),
         status=new_session.status,
-        current_goal=new_session.current_goal,
+        current_goal=old_goal,
         loop_count=new_session.loop_count,
         total_tokens_used=new_session.total_tokens_used,
     )
