@@ -342,6 +342,7 @@ Respond in JSON:
             "present_options": self._tool_present_options,
             # Agent execution
             "run_agent": self._tool_run_agent,
+            "run_agent_team": self._tool_run_agent_team,
             "schedule_agent": self._tool_schedule_agent,
         }
 
@@ -4131,6 +4132,90 @@ Respond in JSON:
     async def _tool_schedule_agent(self, tool_input: Dict[str, Any], *, session=None) -> Dict[str, Any]:
         agent_id = (tool_input or {}).get("agent_id", "")
         return await self._tool_platform_api({"service": "agent_engine", "endpoint": f"/agents/{agent_id}/schedules", "method": "POST", "body": tool_input or {}}, session=session)
+
+    _RUN_AGENT_TEAM_MAX_MEMBERS = 4
+    _RUN_AGENT_TEAM_MEMBER_TIMEOUT_SECONDS = 240
+
+    async def _run_team_member(self, member: Dict[str, Any], *, parent_session: AgentSession) -> Dict[str, Any]:
+        """Run one team member as a real, independent AgentSession in its own db_session."""
+        agent_id = str((member or {}).get("agent_id") or "").strip()
+        goal = str((member or {}).get("goal") or "").strip()
+        if not agent_id or not goal:
+            return {"agent_id": agent_id, "success": False, "error": "Each team member needs both 'agent_id' and 'goal'."}
+
+        from .db import async_session as _async_session
+
+        try:
+            member_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return {"agent_id": agent_id, "success": False, "error": f"Invalid agent_id '{agent_id}' — not a UUID."}
+
+        async with _async_session() as db:
+            result = await db.execute(select(AgentDefinition).where(AgentDefinition.id == member_uuid))
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return {"agent_id": agent_id, "success": False, "error": f"Team member agent '{agent_id}' not found."}
+            if not agent.is_active:
+                return {"agent_id": agent_id, "success": False, "error": f"Team member agent '{agent.name}' is not active."}
+
+            parent_ctx = dict(parent_session.context or {})
+            member_context = {
+                "org_id": parent_ctx.get("org_id"),
+                "team_lead_session_id": str(parent_session.id),
+                "team_lead_agent_id": str(parent_session.agent_id),
+            }
+            child_session = await self.start_session(
+                agent=agent,
+                goal=goal,
+                initial_context=member_context,
+                user_id=parent_session.user_id,
+                db_session=db,
+            )
+            try:
+                loop_result = await asyncio.wait_for(
+                    self.run_loop(child_session, agent, db),
+                    timeout=self._RUN_AGENT_TEAM_MEMBER_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "agent_id": agent_id, "agent_name": agent.name, "session_id": str(child_session.id),
+                    "success": False, "error": f"Team member timed out after {self._RUN_AGENT_TEAM_MEMBER_TIMEOUT_SECONDS}s.",
+                }
+            except Exception as e:
+                return {"agent_id": agent_id, "agent_name": agent.name, "session_id": str(child_session.id), "success": False, "error": str(e)}
+
+            return {
+                "agent_id": agent_id,
+                "agent_name": agent.name,
+                "session_id": str(child_session.id),
+                "success": loop_result.get("status") == "completed",
+                "status": loop_result.get("status"),
+                "output": loop_result.get("output"),
+                "error": loop_result.get("error"),
+            }
+
+    async def _tool_run_agent_team(self, tool_input: Dict[str, Any], *, session: Optional[AgentSession] = None) -> Dict[str, Any]:
+        """Spawn 2-4 specialist agents to work CONCURRENTLY, wait for all, return every member's output together.
+
+        Use this to get independent competing drafts (e.g. two scriptwriters with
+        different creative angles) so you can compare and pick/merge the best one,
+        instead of committing to a single first attempt.
+        """
+        if not session or not getattr(session, "id", None):
+            return {"error": "No active session — run_agent_team must be called from within an agent session."}
+
+        if (session.context or {}).get("team_lead_session_id"):
+            return {"error": "This session is itself a team member — nested teams are not allowed."}
+
+        members = (tool_input or {}).get("members")
+        if not isinstance(members, list) or not (1 < len(members) <= self._RUN_AGENT_TEAM_MAX_MEMBERS):
+            return {"error": f"Provide 'members': a list of 2-{self._RUN_AGENT_TEAM_MAX_MEMBERS} {{agent_id, goal}} objects to run in parallel."}
+
+        print(f"[RUN_AGENT_TEAM] Spawning {len(members)} team members concurrently for session {session.id}", flush=True)
+        results = await asyncio.gather(*(self._run_team_member(m, parent_session=session) for m in members))
+        succeeded = sum(1 for r in results if r.get("success"))
+        print(f"[RUN_AGENT_TEAM] {succeeded}/{len(results)} team members completed successfully", flush=True)
+        return {"members": results, "succeeded": succeeded, "total": len(results)}
 
     # ------------------------------------------------------------------
     # Agent self-call — agents_* and architect_* tools call own API

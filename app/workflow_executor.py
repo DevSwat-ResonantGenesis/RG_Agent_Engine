@@ -4,9 +4,10 @@ Executes team workflows asynchronously.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from uuid import UUID
 
 from sqlalchemy import select
@@ -60,13 +61,15 @@ async def execute_workflow_background(
             # Execute based on workflow type
             workflow_type = team.config.get("type", "sequential") if team.config else "sequential"
             
+            team_user_id = str(team.user_id) if team.user_id else None
+
             try:
                 if workflow_type == "sequential":
-                    result = await execute_sequential(session, agent_ids, input_data)
+                    result = await execute_sequential(session, agent_ids, input_data, team_user_id)
                 elif workflow_type == "parallel":
-                    result = await execute_parallel(session, agent_ids, input_data)
+                    result = await execute_parallel(session, agent_ids, input_data, team_user_id)
                 elif workflow_type == "branching":
-                    result = await execute_branching(session, agent_ids, input_data, team.config)
+                    result = await execute_branching(session, agent_ids, input_data, team.config, team_user_id)
                 else:
                     raise ValueError(f"Unknown workflow type: {workflow_type}")
                 
@@ -90,25 +93,25 @@ async def execute_workflow_background(
 async def execute_sequential(
     session: AsyncSession,
     agent_ids: List[UUID],
-    input_data: Dict[str, Any]
+    input_data: Dict[str, Any],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute agents sequentially, passing output to next agent."""
     current_input = input_data
     results = []
-    
+
     for agent_id in agent_ids:
         # Get agent
         result = await session.execute(
             select(AgentDefinition).where(AgentDefinition.id == agent_id)
         )
         agent = result.scalar_one_or_none()
-        
+
         if not agent:
             logger.warning(f"Agent {agent_id} not found, skipping")
             continue
-        
-        # Execute agent (mock for now - TODO: integrate with actual agent execution)
-        output = await execute_agent_task(agent, current_input)
+
+        output = await execute_agent_task(agent, current_input, user_id)
         results.append({
             "agent_id": str(agent_id),
             "agent_name": agent.name,
@@ -129,48 +132,41 @@ async def execute_sequential(
 async def execute_parallel(
     session: AsyncSession,
     agent_ids: List[UUID],
-    input_data: Dict[str, Any]
+    input_data: Dict[str, Any],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute all agents in parallel with same input."""
-    tasks = []
-    
+    """Execute all agents concurrently (asyncio.gather) with the same input."""
+    agents = []
     for agent_id in agent_ids:
-        # Get agent
         result = await session.execute(
             select(AgentDefinition).where(AgentDefinition.id == agent_id)
         )
         agent = result.scalar_one_or_none()
-        
         if not agent:
             logger.warning(f"Agent {agent_id} not found, skipping")
             continue
-        
-        # Create task for parallel execution
-        task = execute_agent_task(agent, input_data)
-        tasks.append((agent_id, agent.name, task))
-    
-    # Execute all in parallel
+        agents.append(agent)
+
+    outputs = await asyncio.gather(
+        *(execute_agent_task(agent, input_data, user_id) for agent in agents),
+        return_exceptions=True,
+    )
+
     results = []
-    for agent_id, agent_name, task in tasks:
-        try:
-            output = await task
-            results.append({
-                "agent_id": str(agent_id),
-                "agent_name": agent_name,
-                "output": output,
-            })
-        except Exception as e:
-            logger.error(f"Agent {agent_id} failed: {e}")
-            results.append({
-                "agent_id": str(agent_id),
-                "agent_name": agent_name,
-                "error": str(e),
-            })
-    
+    for agent, output in zip(agents, outputs):
+        if isinstance(output, Exception):
+            logger.error(f"Agent {agent.id} failed: {output}")
+            results.append({"agent_id": str(agent.id), "agent_name": agent.name, "error": str(output)})
+        else:
+            results.append({"agent_id": str(agent.id), "agent_name": agent.name, "output": output})
+
     return {
         "type": "parallel",
         "results": results,
-        "combined_output": "\n\n".join([r.get("output", "") for r in results if "output" in r]),
+        "combined_output": "\n\n".join(
+            str(r["output"].get("output", "") if isinstance(r.get("output"), dict) else r.get("output", ""))
+            for r in results if "output" in r
+        ),
     }
 
 
@@ -178,30 +174,42 @@ async def execute_branching(
     session: AsyncSession,
     agent_ids: List[UUID],
     input_data: Dict[str, Any],
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute agents based on branching conditions."""
     # TODO: Implement branching logic based on config
     # For now, fall back to sequential
-    return await execute_sequential(session, agent_ids, input_data)
+    return await execute_sequential(session, agent_ids, input_data, user_id)
 
 
 async def execute_agent_task(
     agent: AgentDefinition,
-    input_data: Dict[str, Any]
+    input_data: Dict[str, Any],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Execute a single agent task.
-    
-    TODO: Integrate with actual agent execution system.
-    For now, returns mock response.
-    """
-    # Simulate agent execution
-    await asyncio.sleep(0.1)
-    
+    """Run a real agent session (start_session + run_loop) and return its actual output."""
+    from .executor import agent_executor
+
+    if isinstance(input_data, dict):
+        goal = input_data.get("goal") or input_data.get("output") or json.dumps(input_data)
+    else:
+        goal = str(input_data)
+
+    async with async_session() as db:
+        child_session = await agent_executor.start_session(
+            agent=agent,
+            goal=goal,
+            initial_context={},
+            user_id=user_id,
+            db_session=db,
+        )
+        result = await agent_executor.run_loop(child_session, agent, db)
+
     return {
         "agent": agent.name,
-        "status": "completed",
-        "output": f"Agent {agent.name} processed the task successfully",
-        "input_summary": str(input_data)[:100],
+        "status": result.get("status"),
+        "output": result.get("output"),
+        "error": result.get("error"),
+        "session_id": str(child_session.id),
     }
