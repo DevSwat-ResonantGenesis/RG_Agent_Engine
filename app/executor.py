@@ -984,7 +984,7 @@ Respond in JSON:
             "limit": limit,
             "use_vector_search": True,
             "retrieval_mode": retrieval_mode,
-            "user_id": session.user_id,
+            "user_id": str(session.user_id) if session.user_id else None,
             "org_id": ctx.get("org_id"),
             "agent_hash": ctx.get("agent_hash"),
             "team_id": ctx.get("team_id"),
@@ -1020,7 +1020,7 @@ Respond in JSON:
         ctx = session.context or {}
         payload: Dict[str, Any] = {
             "chat_id": ctx.get("chat_id"),
-            "user_id": session.user_id,
+            "user_id": str(session.user_id) if session.user_id else None,
             "org_id": ctx.get("org_id"),
             "agent_hash": ctx.get("agent_hash"),
             "source": source,
@@ -1056,7 +1056,7 @@ Respond in JSON:
         ctx = session.context or {}
         payload = {
             "query": query.strip(), "limit": limit,
-            "user_id": session.user_id, "org_id": ctx.get("org_id"),
+            "user_id": str(session.user_id) if session.user_id else None, "org_id": ctx.get("org_id"),
             "agent_hash": ctx.get("agent_hash"), "session_id": ctx.get("chat_id"),
         }
         payload = {k: v for k, v in payload.items() if v is not None}
@@ -1080,7 +1080,7 @@ Respond in JSON:
         """List the user's distilled atomic facts (name/role/preferences/relations),
         entity-resolved and contradiction-superseded."""
         ctx = session.context or {}
-        params = {"user_id": session.user_id, "limit": 100}
+        params = {"user_id": str(session.user_id) if session.user_id else "", "limit": 100}
         for k in ("entity", "attribute"):
             v = (tool_input or {}).get(k)
             if v:
