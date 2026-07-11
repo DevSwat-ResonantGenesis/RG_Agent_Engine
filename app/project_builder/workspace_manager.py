@@ -193,7 +193,7 @@ class WorkspaceManager:
                     total_size_bytes=data.get("total_size_bytes", 0),
                 )
                 for pid, pdata in data.get("projects", {}).items():
-                    workspace.projects[pid] = ProjectMetadata(**pdata)
+                    workspace.projects[pid] = self._project_metadata_from_dict(pdata)
         else:
             workspace_path.mkdir(parents=True, exist_ok=True)
             workspace = UserWorkspace(
@@ -210,6 +210,77 @@ class WorkspaceManager:
         logger.info(f"Workspace loaded for user {user_id} with {len(workspace.projects)} projects")
         return workspace
     
+    def _project_metadata_from_dict(self, data: Dict[str, Any]) -> ProjectMetadata:
+        """Build a ProjectMetadata from a project.json/.workspace.json dict.
+
+        json.load always gives plain strings for project_state/status, and
+        ProjectMetadata(**data) alone leaves them as str even though the
+        fields are typed as enums - dataclasses don't coerce constructor
+        args. Since ProjectState/WorkspaceStatus are (str, Enum), `==`
+        comparisons against the enum still pass by accident, but `.value`
+        access (used when serializing responses) then crashes with
+        AttributeError. Route every dict->ProjectMetadata conversion
+        through here so that never happens.
+        """
+        project_state_str = data.get("project_state", "generated")
+        try:
+            project_state = ProjectState(project_state_str) if isinstance(project_state_str, str) else project_state_str
+        except ValueError:
+            project_state = ProjectState.GENERATED
+
+        status_str = data.get("status", "active")
+        try:
+            status = WorkspaceStatus(status_str) if isinstance(status_str, str) else status_str
+        except ValueError:
+            status = WorkspaceStatus.ACTIVE
+
+        return ProjectMetadata(
+            project_id=data.get("project_id"),
+            name=data.get("project_name", data.get("name", "")),
+            description=data.get("description", ""),
+            tech_stack=data.get("tech_stack", []),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
+            updated_at=data.get("updated_at", data.get("created_at", datetime.now(timezone.utc).isoformat())),
+            status=status,
+            files_count=data.get("files_count", len(data.get("files", []))),
+            total_size_bytes=data.get("total_size_bytes", 0),
+            build_cost=data.get("build_cost", 0.0),
+            agent_id=data.get("agent_id"),
+            project_state=project_state,
+            promoted_at=data.get("promoted_at"),
+            runtime_snapshot_id=data.get("runtime_snapshot_id"),
+            transitions=data.get("transitions", []),
+        )
+
+    async def _reload_project_state(self, user_id: str, project_id: str) -> Optional[ProjectMetadata]:
+        """Re-read a project's canonical state straight from disk.
+
+        agent_engine_service runs 4 uvicorn worker processes (see
+        docker/supervisord.conf, --workers 4), each with its own
+        independent WorkspaceManager singleton and in-memory
+        `_workspaces` cache. promote_project() on one worker is invisible
+        to another worker's already-cached copy of this user's workspace
+        (get_or_create_workspace returns the cache immediately without
+        ever re-checking disk) - so a promote followed by a modify can
+        land on different workers and the modify still sees GENERATED.
+        The filesystem is the one thing every worker actually shares, so
+        governance checks (can_modify_project, get_project_state) and
+        state transitions (promote_project) must re-read it fresh instead
+        of trusting whatever this worker cached first.
+        """
+        project_path = self._find_project_path(user_id, project_id)
+        if not project_path:
+            return None
+        project_file = project_path / ".resonant" / "project.json"
+        if not project_file.exists():
+            return None
+        with open(project_file, "r") as f:
+            data = json.load(f)
+        metadata = self._project_metadata_from_dict(data)
+        workspace = await self.get_or_create_workspace(user_id)
+        workspace.projects[project_id] = metadata
+        return metadata
+
     async def _scan_and_load_projects(self, workspace: UserWorkspace):
         """Scan workspace directory for projects and load them into memory."""
         workspace_path = Path(workspace.workspace_path)
@@ -232,38 +303,13 @@ class WorkspaceManager:
                     with open(resonant_project, "r") as f:
                         data = json.load(f)
                         project_id = data.get("project_id", item.name)
-                        
+                        data.setdefault("project_id", project_id)
+                        data.setdefault("name", item.name)
+
                         if project_id not in workspace.projects:
-                            # Handle project_state - default to GENERATED for backward compatibility
-                            project_state_str = data.get("project_state", "generated")
-                            try:
-                                project_state = ProjectState(project_state_str) if isinstance(project_state_str, str) else project_state_str
-                            except ValueError:
-                                project_state = ProjectState.GENERATED
-                            
-                            # Handle status - could be string or enum
-                            status_str = data.get("status", "active")
-                            try:
-                                status = WorkspaceStatus(status_str) if isinstance(status_str, str) else status_str
-                            except ValueError:
-                                status = WorkspaceStatus.ACTIVE
-                            
-                            metadata = ProjectMetadata(
-                                project_id=project_id,
-                                name=data.get("project_name", data.get("name", item.name)),
-                                description=data.get("description", ""),
-                                tech_stack=data.get("tech_stack", []),
-                                created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
-                                updated_at=data.get("updated_at", data.get("created_at", datetime.now(timezone.utc).isoformat())),
-                                status=status,
-                                files_count=len(data.get("files", [])),
-                                project_state=project_state,
-                                promoted_at=data.get("promoted_at"),
-                                runtime_snapshot_id=data.get("runtime_snapshot_id"),
-                                transitions=data.get("transitions", []),
-                            )
+                            metadata = self._project_metadata_from_dict(data)
                             workspace.projects[project_id] = metadata
-                            logger.info(f"Loaded project {project_id} from filesystem (state: {project_state.value})")
+                            logger.info(f"Loaded project {project_id} from filesystem (state: {metadata.project_state.value})")
                 except Exception as e:
                     logger.warning(f"Failed to load project from {resonant_project}: {e}")
         
@@ -427,12 +473,15 @@ class WorkspaceManager:
         Returns:
             Dict with promotion result and snapshot_id
         """
+        # Reload from disk rather than trusting this worker's cache - a
+        # sibling uvicorn worker may have already promoted this project
+        # (see _reload_project_state's docstring).
+        project = await self._reload_project_state(user_id, project_id)
         workspace = await self.get_or_create_workspace(user_id)
-        project = workspace.projects.get(project_id)
-        
+
         if not project:
             raise ValueError(f"Project {project_id} not found")
-        
+
         if project.project_state == ProjectState.RUNTIME:
             return {
                 "success": True,
@@ -533,14 +582,12 @@ class WorkspaceManager:
     
     async def get_project_state(self, user_id: str, project_id: str) -> Optional[ProjectState]:
         """Get the current state of a project."""
-        workspace = await self.get_or_create_workspace(user_id)
-        project = workspace.projects.get(project_id)
+        project = await self._reload_project_state(user_id, project_id)
         return project.project_state if project else None
-    
+
     async def can_modify_project(self, user_id: str, project_id: str) -> bool:
         """Check if a project can be modified (must be in RUNTIME state)."""
-        workspace = await self.get_or_create_workspace(user_id)
-        project = workspace.projects.get(project_id)
+        project = await self._reload_project_state(user_id, project_id)
         return project.is_mutable() if project else False
 
     async def archive_project(self, user_id: str, project_id: str) -> str:
