@@ -22,6 +22,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 import hashlib
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +166,13 @@ class WorkspaceManager:
         return safe[:50]
     
     def _generate_project_id(self, user_id: str, project_name: str) -> str:
-        """Generate unique project ID."""
-        data = f"{user_id}:{project_name}:{datetime.now(timezone.utc).isoformat()}"
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
+        """Generate unique project ID.
+
+        Must be a valid UUID string: it doubles as the id of the RG_Auth
+        Workspace row created for this project (see create_project), and
+        that column is a Postgres UUID primary key.
+        """
+        return str(uuid.uuid4())
     
     async def get_or_create_workspace(self, user_id: str) -> UserWorkspace:
         """Get existing workspace or create new one."""

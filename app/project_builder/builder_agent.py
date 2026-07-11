@@ -14,6 +14,7 @@ Features:
 
 import asyncio
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -21,6 +22,12 @@ from enum import Enum
 from pathlib import Path
 import json
 import httpx
+
+# Auth service config (for syncing built projects into the shared Unify
+# Workspace list - see workspace_manager._generate_project_id for why
+# project_id is minted as a UUID)
+AUTH_SERVICE_URL = os.getenv("AUTH_URL", "http://auth_service:8000")
+_INTERNAL_SERVICE_KEY = os.getenv("AUTH_INTERNAL_SERVICE_KEY") or os.getenv("INTERNAL_SERVICE_KEY") or ""
 
 from .workspace_manager import (
     WorkspaceManager, 
@@ -171,7 +178,28 @@ class ProjectBuilderAgent:
         await self.code_validator.close()
         await self.state_tracker.close()
         await self.rara_governance.close()
-    
+
+    async def _sync_unify_workspace(self, user_id: str, project_id: str, title: str) -> None:
+        """Best-effort upsert of a Workspace row in RG_Auth so this build
+        shows up in the shared Unify Workspace list. Never raises - a
+        build must still succeed even if RG_Auth is briefly unreachable.
+        """
+        if not user_id or user_id == "anonymous":
+            return
+        headers = {"x-internal-service-key": _INTERNAL_SERVICE_KEY} if _INTERNAL_SERVICE_KEY else {}
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{AUTH_SERVICE_URL.rstrip('/')}/auth/internal/workspaces/upsert",
+                json={"id": project_id, "user_id": user_id, "title": title},
+                headers=headers,
+                timeout=5.0,
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"Unify Workspace sync failed for {project_id}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.warning(f"Unify Workspace sync failed for {project_id}: {e}")
+
     async def build_project(
         self,
         user_id: str,
@@ -207,6 +235,8 @@ class ProjectBuilderAgent:
             tech_stack=self._get_tech_stack(project_type),
         )
         project_id = project_metadata.project_id
+
+        await self._sync_unify_workspace(user_id, project_id, project_name)
         
         project_path = await self.workspace_manager.get_project_path(user_id, project_id)
         if not project_path:
