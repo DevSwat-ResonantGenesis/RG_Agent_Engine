@@ -4,7 +4,7 @@ Version 1.0, March 2026
 Copyright (c) 2025-2026 Resonant Genesis / DevSwat
 Founded and built by Louie Nemesh
 
-https://dev-swat.com | https://dev-swat.com | https://resonantgenesis.ai
+https://dev-swat.com | https://resonantgenesis.ai
 
 
 1. DEFINITIONS
