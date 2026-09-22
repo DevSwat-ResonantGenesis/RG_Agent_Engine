@@ -1841,11 +1841,9 @@ async def list_agents(
     User isolation: Each user only sees their own agents.
     The x-user-id header is set by the gateway auth middleware.
     """
-    logger.info(f"[LIST-AGENTS] Called with headers: user_id={request.headers.get('x-user-id')}, org_id={request.headers.get('x-org-id')}")
     try:
         user_id = request.headers.get("x-user-id")
         if not user_id:
-            logger.warning("[LIST-AGENTS] No user_id in headers")
             raise HTTPException(status_code=401, detail="User ID required")
 
         stmt = select(AgentDefinition)
@@ -1861,7 +1859,6 @@ async def list_agents(
         try:
             user_uuid = PyUUID(user_id)
         except (ValueError, AttributeError):
-            logger.error(f"[LIST-AGENTS] Invalid user_id format: {user_id}")
             raise HTTPException(status_code=400, detail="Invalid user ID format")
         if org_uuid:
             # Multi-tenant: user sees own agents + org-shared agents
@@ -1869,16 +1866,12 @@ async def list_agents(
                 AgentDefinition.user_id == user_uuid,
                 AgentDefinition.org_id == org_uuid,
             ))
-            logger.info(f"[LIST-AGENTS] Querying for user={user_uuid} OR org={org_uuid}")
         else:
             stmt = stmt.where(AgentDefinition.user_id == user_uuid)
-            logger.info(f"[LIST-AGENTS] Querying for user={user_uuid} (no org)")
         stmt = stmt.where(AgentDefinition.archived_at.is_(None))
         
         result = await session.execute(stmt)
-        logger.info(f"[LIST-AGENTS] Query executed")
         agents = result.scalars().all()
-        logger.info(f"[LIST-AGENTS] Found {len(agents)} agents")
 
         # Batch-query running session counts per agent
         agent_ids = [a.id for a in agents]
